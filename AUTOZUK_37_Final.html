@@ -243,18 +243,16 @@ canvas#grid{border:1px solid var(--panel-border);cursor:crosshair;image-renderin
   </div>
 </div>
 
-<script>
+<script id="sim-core">
 // =====================================================
-// AUTOZUK — Phase 1 Sim Engine + Phase 2 Solver
+// SIM CORE — pure engine (shared between main thread and workers)
 // =====================================================
-
 const ARENA_X_MIN=1,ARENA_X_MAX=29,ARENA_Y_MIN=1,ARENA_Y_MAX=30;
 const ARENA_W=ARENA_X_MAX-ARENA_X_MIN+1, ARENA_H=ARENA_Y_MAX-ARENA_Y_MIN+1;
 const SPAWN_LOCATIONS=[{x:2,y:6},{x:23,y:6},{x:4,y:12},{x:24,y:13},{x:17,y:18},{x:6,y:24},{x:24,y:26},{x:2,y:29},{x:16,y:29}];
 const PILLAR_LOCS={S:{x:11,y:24,size:3},W:{x:1,y:10,size:3},N:{x:18,y:8,size:3}};
 const BFS_DIRS=[[-1,0],[1,0],[0,1],[0,-1],[-1,1],[1,1],[-1,-1],[1,-1]];
 
-function isDarkColor(c){let r=parseInt(c.slice(1,3),16),g=parseInt(c.slice(3,5),16),b=parseInt(c.slice(5,7),16);return(r*299+g*587+b*114)/1000<128}
 const MOB_DEFS={
   mager:{letter:'M',size:4,hp:220,atkSpeed:4,range:15,style:'magic',color:'#4F86E8',hasFlicker:true},
   ranger:{letter:'R',size:3,hp:125,atkSpeed:4,range:15,style:'range',color:'#43A85B'},
@@ -313,79 +311,6 @@ const LOADOUTS = {
     }
   }
 };
-let currentLoadout = LOADOUTS.blowpipe;
-
-// ===== PHASE 1: STATE =====
-let sim=null,pillars={S:true,W:true,N:true},playerPlacement=null;
-let playing=false,playInterval=null;
-let tickEvents=[],mobIdCounter=0;
-let tickHits={},gridMobColumns=[];
-let previewMobs=[];
-let tickGridUserScrolled=false,eventListUserScrolled=false;
-
-// ===== PHASE 2: STATE =====
-let autozukRunning=false, autozukResults={}, autozukMode=false, autozukHidden=false;
-let selectedTile=null, excludedTiles=new Set();
-let activePrayerSeq=null; // 4-slot prayer sequence for tick grid display
-let facingSouth=true;
-const FLOOR_RAW='311d25,2f1c24,301b22,311c24,311c22,301a20,301a1f,311b20,301b20,301b20,301c21,301c21,301c23,301c23,301c23,301c23,2f1c23,2e1b22,301d23,301c22,321e24,2c171d,311b21,311b21,321c23,321c23,311c22,301c21,2f1c23|2e1b23,2e1b23,2e1b22,311c23,311c22,301b21,311b20,311c21,311b20,311c21,311c22,311d23,301d24,311d24,311d24,311d24,321f26,301c23,2d1a20,2d1a20,321d23,301c21,321d23,311c22,311c22,311c22,301c21,301c21,2f1c23|2d1b23,301d25,301e24,301c23,2f1c21,301c21,311d21,311d21,321e23,321e23,331e23,331f24,332025,332026,332026,332026,342229,332127,301e23,311e24,311d23,311e24,311c22,311c22,301c21,301c21,301c21,301c21,2f1c23|2c1b23,2e1d25,2f1e25,2e1c22,2d1b20,301c22,321f23,331e23,352125,352125,362226,372227,362327,372428,372428,362429,342328,332329,342429,352328,301e23,301d23,2c181e,301b21,301b21,301b21,301c21,301c21,301c23|2c1b23,2d1d24,2d1d24,2c1b21,2d1c21,311e24,342125,352226,362327,372426,382529,39262a,39272a,3a272b,39282b,38282b,3b2b2f,322327,332327,332327,36252a,37252a,321e24,342127,301c21,301c21,301c21,301c21,301c21|2f2027,2e1e26,2d1e25,2f1f25,302025,312124,332225,362326,382628,392728,3b2829,3c2a2b,3d2b2b,3d2b2c,3d2b2c,3c2c2d,36282a,1d1014,1a0c14,1c0d14,302024,332327,2e1c21,2f1c21,301d23,311d23,311c22,301c21,301c21|291b22,26181f,281a20,302126,342429,342327,342326,382628,3c2a2b,3d2c2b,3e2d2c,402f2e,41302e,41302e,41302e,3f312f,3e3232,1a0d14,160b14,180b14,38292c,3b2b2e,36262a,362329,321e24,311e24,301d23,2f1c21,2e1b21|1a0d14,170b14,1d1016,2b1d22,34262a,362629,382829,3c2c2c,3f2e2d,402f2d,42312e,433230,443430,443430,443430,433431,403432,170d14,170c14,180c14,3b2d2f,38292c,362529,342429,322025,321e24,301d23,2f1c21,2e1b21|180b14,160b14,1a0c14,302326,36272a,392a2c,372727,3e2e2e,40312e,42332f,443630,463731,483932,493b34,493a32,473a32,453a34,423834,413532,3e3330,3e302f,3b2c2d,38282b,362529,352328,332126,311e24,2f1c21,2e1b21|190b14,180b14,1c0f14,2e2125,362729,3b2c2d,3c2c2b,433330,443430,463730,493a32,4a3c33,4c3e35,4d4035,4d4035,4b3e35,483e35,463c35,443933,423632,413330,3e2f2f,3b2b2c,38272a,362428,342227,321e24,301c22,2f1c21|2f2026,2f2026,302126,38292c,3a2b2c,3d2e2e,3e2e2c,43332f,483932,4a3c33,4d4035,4f4236,514438,524639,524639,514537,4d4337,4b4136,493e35,463a32,443731,413230,3d2d2e,3c2a2c,38262a,362327,332025,311d23,301c22|312128,322329,35252a,39292c,3b2b2c,3f302d,43332f,473831,4b3d34,4e3f34,514437,534739,554a3a,574c3b,574c3b,554b3a,524839,504637,4c4235,4a3d34,473931,433430,41302e,3d2c2c,3b282b,382529,342127,321e24,301d23|2d1c23,312125,362629,382829,3c2c2c,42312e,483732,4a3b33,4d3f35,514336,54483a,584c3b,5a4f3c,5b523e,5b523e,59503c,574d3a,554939,514637,4d4133,4a3c32,473630,42312f,3f2d2d,3c292b,39272b,362228,321f25,301e23|332126,352528,3c2b2e,3c2a2c,402f2e,42312d,483831,4a3a31,504236,544639,584c3b,5c513e,5e5440,5f5740,5f5740,5d553f,5d523d,5a4e3b,554938,514336,4d3e32,493931,44332f,412f2f,3d2a2c,3a272b,362327,332025,311e24|311e24,322024,39272a,3a2829,412f2e,42302c,493932,4c3c32,524437,56493a,5a4e3c,5e533f,605741,635a43,625a42,605841,5f553e,5d513c,584c39,544535,4f3f33,4a3931,46342f,42302f,3d2b2c,3b282b,362327,332025,311f25|362329,362327,3c292c,3b292a,43312f,41312c,4a3933,4c3d33,524437,564a39,5b503d,5e5540,625943,645c44,635d44,625a42,605640,5e513d,594c3a,544636,4f3f33,4a3a31,45342f,42312e,3d2b2c,3b282a,362327,332025,321e25|342125,362327,39272a,3d2b2c,402f2e,433431,483934,4b3e34,53463a,534838,5c5140,5e5541,625943,625a42,645e45,635b44,605542,5d513f,584c3b,534638,4e3f34,493a32,44352f,42312e,3d2c2b,3a282a,362327,332024,321e24|332125,362326,38272a,3c2b2b,3e2e2e,433330,473933,4a3d35,504439,55493c,564c3c,5f5543,5d5440,675e48,615a42,5f5741,5f5442,5c5040,574a3c,524638,4d4035,483b32,44352f,41322f,3d2c2b,3a282a,362327,332024,331e24|322024,352226,382629,3b292a,3e2e2d,42322f,463833,493c34,4f4239,54483c,554b3c,5d5342,5a523f,605744,5d543f,5e5540,5c5140,594d3d,55483a,504337,4c3e35,483932,433430,40312e,3c2b2a,39282a,362327,332024,321e24|322024,342225,372629,3b292a,3d2d2c,41312f,463632,483934,4d3f37,4f4337,564a3d,574c3d,5b5141,544c3a,584f3c,5c5240,584c3c,55493b,514437,4d4035,4a3b34,463730,41322e,3e2f2c,3b292a,392729,362326,322024,321d23|321f23,342125,362527,39282a,3c2b2b,3f2f2e,433431,463833,463830,4d4138,4f4239,4e4437,564c3d,5b5142,574d3e,53493a,53473a,514438,4e4036,4a3c33,473831,43342f,41302d,3e2d2b,3a2829,372627,342225,321f23,301d23|311e23,332024,352326,382628,3a282a,3e2c2d,41312f,433431,483a35,493c34,221514,170b14,1c0f14,4c4136,51463a,53473b,4f4237,4d4035,4a3c33,483931,453630,42322e,3f2e2c,3c2b2a,382628,362427,332024,311d23,301c23|301d21,321f23,342125,362326,382628,3b292a,3e2e2d,41312f,423330,463833,1a0b14,160b14,180b14,50433b,4a3e35,493d34,4a3d34,493b33,473831,443630,43322e,402f2c,3c2b2a,392829,372427,342226,321f23,301c22,2f1c23|2f1c20,311e22,332024,352226,362527,39282a,3c2c2c,3e2e2e,413130,423230,1c0d14,1a0b14,1e1014,483b35,443730,483934,473831,463730,43342f,41322e,402f2c,3d2c2a,392829,372527,362327,332125,311e24,2f1c21,2e1b22|301d21,301d21,311e22,332024,352326,382628,3b292b,3c2b2b,3d2d2e,3e2e2e,413130,423331,433431,433431,433431,423430,42332f,43322e,41302e,3f2e2c,3c2b2a,392829,382527,372427,332024,321e24,301d24,2f1c23,2e1b22|2f1c21,2f1c20,301d21,321f23,332125,362527,38272a,39282a,3b2b2c,3c2c2c,3d2d2e,3f2f2f,403030,3f312f,3f312f,3f302e,402f2d,3f2e2c,3e2d2c,3c2b2a,392829,372627,362326,342226,321e24,311e24,301d24,2f1c23,2e1b22|2e1b22,2e1b21,2f1c21,301d23,321e24,332125,352327,362527,382629,392729,3b292b,3b2b2c,3c2c2d,3c2c2c,3c2c2c,3c2c2c,3c2b2b,3c2a2a,3b2829,392629,372528,352226,332125,321f25,301d23,301d24,301c24,2f1c24,2f1c23|2e1b22,2e1b22,2e1b22,2f1c21,301d23,311e24,322025,322024,352327,362427,372629,382729,382829,38282a,382829,392729,392629,382628,372527,362327,342226,332025,321e24,311e25,2f1c23,2f1c23,2f1c24,2f1c24,2f1c23|2f1c24,2f1c23,2f1c23,2f1c23,301c23,301d23,311d23,311e23,332024,332124,342225,352326,362426,362426,362426,362426,362326,372226,362125,342025,322024,311e24,301d24,301c24,2e1b23,2e1b23,2f1c24,2f1c24,301c24|301c24,2f1c24,2f1c23,2f1c23,2f1c23,301c23,301c22,301d23,311e23,321f23,322023,322124,332123,332123,332123,332123,352125,342024,331f24,321e23,301d23,301c22,2f1c24,2e1b23,2f1c24,2f1c24,2f1c24,2f1c24,2f1c24'.split('|').map(r=>r.split(',').map(c=>'#'+c));
-function drawFlipText(t,x,y){if(facingSouth){ctx.save();ctx.translate(x,y);ctx.scale(-1,-1);ctx.fillText(t,0,0);ctx.restore()}else ctx.fillText(t,x,y)}
-function drawHealthBar(bx,byAbove,byBelow,bw,pct){
-  if(facingSouth){
-    // Draw below mob in canvas coords (appears above after flip), counter-rotate fill
-    ctx.save();ctx.translate(bx+bw/2,byBelow+1.5);ctx.scale(-1,-1);
-    ctx.fillStyle='#ff0000';ctx.fillRect(-bw/2,-1.5,bw,3);
-    ctx.fillStyle='#00ff00';ctx.fillRect(-bw/2,-1.5,Math.max(0,bw*pct),3);
-    ctx.restore();
-  }else{
-    ctx.fillStyle='#ff0000';ctx.fillRect(bx,byAbove,bw,3);
-    ctx.fillStyle='#00ff00';ctx.fillRect(bx,byAbove,Math.max(0,bw*pct),3);
-  }
-}
-
-
-// ===== PRAYER ICONS (base64) =====
-const PRAYER_IMG_DATA={
-  mage:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAbABsDASIAAhEBAxEB/8QAGAAAAwEBAAAAAAAAAAAAAAAAAAUHBgj/xAAmEAABAwQCAQQDAQAAAAAAAAABAgMFBAYREgAHMRQhIkEyUXFi/8QAFwEBAAMAAAAAAAAAAAAAAAAABQIDBv/EACgRAAEDAgQEBwAAAAAAAAAAAAECESEDBAAFMUEiUXLwBhMUMkJhcf/aAAwDAQACEQMRAD8A4y4ce2Rac5eU61DQFGamqdOB9JT58n68H+AEnABItVgdUW9DTzYlK9i5KxlIqnfQqUqnjmUpC1uvKT8XAkHGraiVH2StCgNqri5oWoCq62eQBKiHbhTqZgGA8EjCuXZPc35emGSNTsBz7h4fE3t6xKiPjG7qvFh+NhPNOpTYUp9wH4jQ/k3sNFke6MjIyQDkLir6aTmqqvo42njGHlbIpGCS2yMAapz74/uT+yfPNn3R2LX3pJNR6VqRDRilN0TO4WB7kFQIASAf8gDGAAlIQhE84hVrK8pNEpCWckAvLnVTByAwJACXdnDEwv10kH09D2g67k/vLuYx0nSzMjEdaWpQxRYpW5K3x6xxqmbDzwNQ6kpU6E76kNoBTtggYxji7sicjrF6+ct+iq/UXJcFOxUVS0tjFLTKAcQ2lRG2xyhalAgbJQkbaqPJdD9pdhw8XTxcVd8rRUVMjRlhl7VCE/oAcQ3LcEzcsoZSekX5GtUgIU+8crUkeAT944FSy1AzBd5UL8Slp6ip0E9A0b5BJ0DF648TINmbegkgkCYb703LAvJgbRhZw4cOJYx+P//Z',
-  range:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAYABgDASIAAhEBAxEB/8QAGQABAQEAAwAAAAAAAAAAAAAAAAYEAwUI/8QAKhAAAgEEAQEGBwEAAAAAAAAAAQIDAAQREgUiBhMxMkFRFCElQ2FykqH/xAAVAQEBAAAAAAAAAAAAAAAAAAAEBf/EACURAAIBAQcFAQEAAAAAAAAAAAECESEAAwQSMUFRBWFxkdGB4f/aAAwDAQACEQMRAD8A8ZV2/ZWwt+Q5PS6DPHGFbuwde8ZpERVLeKrs4yQCcA4+dYuLsLjkbsW9uFBALu7nVI0Hi7H0Ue9Vn0/iuK+4LAP+k3ISr/qop/j8yHoo4HCM83pgATE6TyewMFvwVJALsJhi83hoBOuk/BSfVSQDy9qOBUpKDCkYjWS4t7i2gjVJEWPLqyDDBQy9LdXnAJJIJVN8p2gvuQtDavrHGxBk1eR2kx5QzOzEqDkhc4yScZpRr68LqgdszgVaInj0N4E8cnvXzKoY5mGp0nj0N4E8WobO5sYOM0f4YwmCKRliuYIttIA2Dqe8MhlBXqzjYkDbVlkeUv7jkbs3FwVBACIiDVI0Hgij0Ue1KVT6qWRVQMYavweBWBtJ5s/qDsFVZoa/zwNh3NstKUqJaVb/2Q==',
-  melee:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAeAB4DASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAABQADBgcIBP/EACcQAAICAQQBAwQDAAAAAAAAAAECAwQRBQYSIQAHEzIVIjFBYXFi/8QAFwEBAQEBAAAAAAAAAAAAAAAABAUBA//EAC8RAAEDAgQDBAsAAAAAAAAAAAECAxEhMRIiMkEABAUTM1HwQlJhYnGBkaGxweH/2gAMAwEAAhEDEQA/AMZeF9s7d1HcNg1tMjeewXCRwRQSzSyMVdsKkaMxwsbE9dAeCPJ7sptW2tNFfo2rFHVorMFkTwkhqIHIAP0QzyKzqIiDkE5H687tNLWha0gZUk5pAxQcIMVqqLVubA8J5ZsKJUvSBX6UHxJ8xPArStLrVu4p6epW5UyjKPcgrIR83DAcpPyAhHWMn9eObqSj9IZqcWfamhjklNeJMS8Zi6q0aLkYEZwckE+XxvbUdu+sHpre3LX06lo3qHt1Bb12GiYxNbpqBHO6vzAZVRQw58njMYQfNWfOO6rDvq01FQsdWjI8FeFOlRQxGf5Y4ySeyfDdI6yvqDDq3EdkWzgLUzmInET6QIqlW9AIAoxa0paJTpsAN5mp/s1gClpZ6abK1TWLqHTa3v3QiTPOU5wabE3azSn4+4QCUUkAY5HAHUk3la0PRKkuh6ROTWpOyXtSzzd5W+axkgc53wMseowB0pH2i9q+rOobc2da21pVyejBdMbz2IaYNqNhDFE4il90BcrF03DI5EjBAIrvWNSfUJI1WNa9WAcK9dD9sS/6x/JY9k+XuYQGAC4Mg0p9b3lfad7JEC2PJDQGMZRpHj7T+99hAt1XNw2puEMNenDThyK9dq0coiX+3Ukk4yT+z34Lszy2bMtiZucsrl3bAGWJyT1434vJb/NPP94on8fIWEWEWFOAuvuO61E+fDj/2Q=='
-};
-
-// ===== AUDIO SYSTEM =====
-let audioCtx=null;
-function ensureAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}
-function playExclusionBlip(){
-  let ac=ensureAudio(),t=ac.currentTime;
-  let osc=ac.createOscillator(),gain=ac.createGain();
-  osc.connect(gain);gain.connect(ac.destination);
-  osc.type='square';osc.frequency.setValueAtTime(1800,t);osc.frequency.exponentialRampToValueAtTime(800,t+0.03);
-  gain.gain.setValueAtTime(0.04,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.04);
-  osc.start(t);osc.stop(t+0.04);
-}
-function playScoreBlip(avgDmg){
-  let ac=ensureAudio(),t=ac.currentTime;
-  let osc=ac.createOscillator(),gain=ac.createGain();
-  osc.connect(gain);gain.connect(ac.destination);
-  // Score 0 = 880Hz (high), score 100+ = 440Hz (low), linear in between
-  let clamped=Math.max(0,Math.min(100,avgDmg));
-  let freq=880-clamped*4.4; // 880 → 440
-  // Perfect tile (rounds to 0): +25% pitch boost
-  if(Math.round(avgDmg)===0)freq=880*1.25;
-  osc.type='sine';osc.frequency.setValueAtTime(freq,t);
-  gain.gain.setValueAtTime(0.08,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.08);
-  osc.start(t);osc.stop(t+0.08);
-}
-
-const canvas=document.getElementById('grid');
-const ctx=canvas.getContext('2d');
-let TILE_SIZE=20;
-
-function resizeCanvas(){
-  TILE_SIZE=Math.min(Math.floor((window.innerHeight-70)/ARENA_H),Math.floor((window.innerWidth-720)/ARENA_W),24);
-  TILE_SIZE=Math.max(TILE_SIZE,14);
-  canvas.width=ARENA_W*TILE_SIZE; canvas.height=ARENA_H*TILE_SIZE; render();
-}
-window.addEventListener('resize',resizeCanvas);
 
 // ===== UTILITY FUNCTIONS =====
 function chebyshev(x1,y1,x2,y2){return Math.max(Math.abs(x2-x1),Math.abs(y2-y1))}
@@ -526,10 +451,8 @@ function osrsWalkStep(sx,sy,tx,ty,region){
   return playerBFS(sx,sy,tx,ty,region);
 }
 
-// ===== PHASE 1: SIM ENGINE =====
 const DEATH_ANIM_TICKS=3;
-function createMob(type,x,y,id){let d=MOB_DEFS[type];return{id:id||mobIdCounter++,type,letter:d.letter,x,y,size:d.size,hp:d.hp,maxHp:d.hp,atkSpeed:d.atkSpeed,range:d.range,style:d.style,color:d.color,attackDelay:0,stunned:0,frozen:0,dead:false,dying:-1,dyingStartTick:-1,corpseRemovalTick:undefined,revivedOnce:false,hasLOS:false,hadLOS:false,isBlob:d.isBlob||false,blobScanPrayer:null,hasDig:d.hasDig||false,digTimer:0,digLocation:null,hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0}}
-function createPlayer(x,y){return{x,y,size:1,hp:99,maxHp:99,aggro:null,attackDelay:0,range:currentLoadout.range,atkSpeed:currentLoadout.atkSpeed,incomingProjectiles:[],autoRetaliate:true,lastHit:true,recoilQueue:[],echoBootsCooldown:0,lastBarrageTarget:null,lastAttacker:null}}
+
 function createRegion(pillarConfig){
   let entities=[];
   for(let x=ARENA_X_MIN-1;x<=ARENA_X_MAX+1;x++){entities.push({x,y:ARENA_Y_MIN-1,size:1});entities.push({x,y:ARENA_Y_MAX+1,size:1})}
@@ -544,6 +467,7 @@ function createRegion(pillarConfig){
     for(let ex=e.x;ex<=ex1;ex++)for(let ey=ey0;ey<=e.y;ey++)blocked[(ex<<6)|ey]=1}
   return{entities,pillars:p2,blocked};
 }
+
 function spawnNibblers(mobs,region,createFn,idFn){
   // Spawn 3 nibblers in the 3x3 box: gameX 19-21, gameY 25-27
   // (local coords 9:17 to 11:19 where SW=1:1)
@@ -559,21 +483,6 @@ function spawnNibblers(mobs,region,createFn,idFn){
   }
 }
 
-function initSim(spawnCode,playerPos){
-  mobIdCounter=0;tickEvents=[];tickHits={};gridMobColumns=[];
-  let region=createRegion(pillars),mobs=[],player=createPlayer(playerPos.x,playerPos.y),deadMobs=[];
-  let parsed=parseSpawnCode(spawnCode);
-  if(parsed.error){setStatus(parsed.error,'error');return null}
-  for(let spawn of parsed.spawns){if(spawn.type==='nothing')continue;let mob=createMob(spawn.type,spawn.x,spawn.y,mobIdCounter++);mob.aggroTarget='player';mob.infNum=spawn.infNum||0;mobs.push(mob)}
-  // Sort by game index: higher infNum = lower game index = processed first
-  if(parsed.hasIndexInfo)mobs.sort((a,b)=>b.infNum-a.infNum);
-  // Spawn 3 nibblers randomly if all pillars are dead
-  let allPillarsDead=!pillars.S&&!pillars.W&&!pillars.N;
-  if(allPillarsDead){spawnNibblers(mobs,region,(t,x,y,id)=>createMob(t,x,y,id),()=>mobIdCounter++)}
-  for(let m of mobs)gridMobColumns.push({id:m.id,letter:m.letter,color:m.color,type:m.type});
-  sortMobColumns();
-  return{region,mobs,player,tick:0,deadMobs,delayedBlobletSpawns:[]};
-}
 function parseSpawnCode(code){
   code=code.trim().toUpperCase();if(!code)return{error:"Enter a spawn code"};
   let spawns=[],i=0,pos=0;
@@ -596,333 +505,19 @@ function parseSpawnCode(code){
   return{spawns,hasIndexInfo:hasExplicit};
 }
 
-function markMobForProjectileRemoval(mob,tick){
-  if(mob.dead)return;
-  mob.hp=0;
-  if(mob.pendingRemovalTick===undefined||mob.pendingRemovalTick>tick+1){
-    mob.pendingRemovalTick=tick+1;
-    mob.dyingStartTick=tick;
-  }
-}
-function processCorpseExpiry(simRef,tick){
-  for(let mob of simRef.mobs){
-    if(mob.dead||mob.dying<=0)continue;
-    let remain=(mob.corpseRemovalTick??tick)-tick;
-    if(remain<=0){mob.dead=true;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
-    else mob.dying=remain;
-  }
-}
-function processPendingMobDeaths(simRef,tick){
-  let player=simRef.player;
-  for(let mob of simRef.mobs){
-    if(mob.dead||mob.dying>0)continue;
-    if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
-      mob.pendingRemovalTick=undefined;
-      mob.dying=DEATH_ANIM_TICKS;
-      mob.corpseRemovalTick=tick+DEATH_ANIM_TICKS;
-      onMobDeath(mob,player,simRef.region,simRef.mobs,tick,simRef);
-    }
-  }
-}
-function canSetLastAttacker(player,mob){let a=player.aggro;return !a||a.dead||a===mob}
-function setPlayerLastAttacker(player,mob){
-  // While the player is already engaged, other NPCs do not steal last_attacker.
-  if(canSetLastAttacker(player,mob))player.lastAttacker=mob;
-}
-
-function simulateTick(){
-  if(!sim)return;sim.tick++;
-  let t=sim.tick,region=sim.region,mobs=sim.mobs,player=sim.player;
-  processCorpseExpiry(sim,t);
-  processPendingMobDeaths(sim,t);
-  processDelayedBlobletSpawns(sim,t);
-  // Process recoil queue (ring of suffering + echo boots)
-  if(player.recoilQueue.length>0){
-    let rem=[];
-    for(let r of player.recoilQueue){
-      if(r.tick<=t){
-        let mob=mobs.find(m=>m.id===r.mobId&&!m.dead&&m.dying<=0&&m.pendingRemovalTick===undefined);
-        if(mob&&mob.dying===-1&&mob.pendingRemovalTick===undefined){mob.hp-=r.damage;if(mob.hp<=0){markMobForProjectileRemoval(mob,t)}
-          tickEvents.push({tick:t,type:mob.type,detail:`${r.source==='ring'?'Ring of Suffering':'Echo Boots'} recoil ${r.damage} → ${mob.type} #${mob.id}`,mobId:mob.id,isHit:true})}
-      }else{rem.push(r)}
-    }
-    player.recoilQueue=rem;
-  }
-  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}moveMob(mob,player,region,mobs,sim)}
-  for(let mob of mobs){if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;mobAttackStep(mob,player,region,mobs,t,sim)}
-  // Player projectiles land after NPC actions for this tick. A fatal hit marks the
-  // target for removal on the next tick, but it does not prevent this tick's attack.
-  for(let mob of mobs){if(!mob.dead&&mob.dying<=0)processIncomingProjectiles(mob,t)}
-  processPlayerProjectiles(player,t);
-  player.attackDelay--;movePlayer(player,region,mobs);playerAttackStep(player,mobs,region,t);
-  if(!autozukRunning)updateUI();
-}
-function processIncomingProjectiles(mob,tick){let rem=[];for(let p of mob.incomingProjectiles){p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){markMobForProjectileRemoval(mob,tick)}}}else rem.push(p)}mob.incomingProjectiles=rem}
-function processPlayerProjectiles(player,tick){
-  let rem=[],arrived=[];
-  for(let p of player.incomingProjectiles){p.delay--;
-    if(p.delay<=0){tickEvents.push({tick,type:p.mobType,detail:`${p.style} hit from ${p.mobType} (id:${p.mobId})`,mobId:p.mobId,isHit:true});
-      arrived.push(p);
-      // Apply actual damage using loadout + prayer
-      let loadout=currentLoadout;
-      let praySeq=activePrayerSeq;
-      if(!praySeq&&playerPlacement){let pk=`${playerPlacement.x},${playerPlacement.y}`;if(autozukResults[pk])praySeq=autozukResults[pk].prayer}
-      let blocked=false;
-      if(praySeq){let prayTick=p.fireTick!==undefined?p.fireTick:tick;let pray=praySeq[prayTick%4];
-        if(p.style==='magic'&&pray==='mage')blocked=true;
-        if(p.style==='range'&&pray==='range')blocked=true;
-        if(p.style==='melee'&&pray==='melee')blocked=true;}
-      if(!blocked){
-        let atkStats=resolveMonsterAttackStats(loadout,p.mobType,p.style);
-        if(atkStats){let acc=atkStats.acc,maxH=atkStats.max;
-          if(Math.random()<acc){let dmg=Math.floor(Math.random()*(maxH+1));
-            if(dmg>0){
-              player.hp-=dmg;
-              // Recoil damage (Blood Barrage loadout only)
-              if(loadout.hasRecoil){
-                let attackerMob=sim.mobs.find(m=>m.id===p.mobId&&!m.dead&&m.dying<=0&&m.pendingRemovalTick===undefined);
-                if(attackerMob){
-                  // Ring of Suffering: floor(dmg*0.1+1) damage, 1 tick after hit
-                  let ringDmg=Math.floor(dmg*0.1+1);
-                  player.recoilQueue.push({tick:tick+1,mobId:p.mobId,damage:ringDmg,source:'ring'});
-                  // Echo Boots: 1 damage if attacker within 1 tile, 1 tick after hit, 4-tick cycle
-                  let mobDist=distToMob(player.x,player.y,attackerMob);
-                  if(mobDist<=1&&tick>=player.echoBootsCooldown){
-                    player.recoilQueue.push({tick:tick+1,mobId:p.mobId,damage:1,source:'echo'});
-                    player.echoBootsCooldown=tick+4;
-                  }
-                }
-              }
-            } else {
-              player.hp-=dmg; // dmg is 0, no recoil
-            }
-          }
-        }
-      }
-    }else rem.push(p)}
-  // Auto-retaliate: target lastAttacker (set when mob fires, not when projectile lands)
-  if(player.autoRetaliate&&arrived.length>0){
-    if(!player.aggro||player.aggro.dead||(player.aggro.dying>0&&tick>player.aggro.dyingStartTick)){
-      let target=player.lastAttacker;
-      if(target&&!target.dead&&target.dying===-1&&target.pendingRemovalTick===undefined){
-        player.aggro=target;
-        let fd=Math.floor(currentLoadout.atkSpeed/2)+1;if(player.attackDelay<fd)player.attackDelay=fd;
-      }
-    }
-  }
-  player.incomingProjectiles=rem;
-}
-function recordTickHit(tick,mobId,mobType,style,isScan){
-  if(!tickHits[tick])tickHits[tick]=[];let d=MOB_DEFS[mobType];
-  tickHits[tick].push({mobId,mobType,color:d?d.color:'#888',letter:d?d.letter:'?',style,isScan});
-  if(!gridMobColumns.find(c=>c.id===mobId)){gridMobColumns.push({id:mobId,letter:d?d.letter:'?',color:d?d.color:'#888',type:mobType});sortMobColumns();rebuildTickGridHeader()}
-}
-const MOB_TYPE_PRIORITY={mager:0,ranger:1,meleer:2,blob:3,bat:4,nibbler:5,blobletMage:6,blobletRange:7,blobletMelee:8};
-function sortMobColumns(){gridMobColumns.sort((a,b)=>{let pa=MOB_TYPE_PRIORITY[a.type]??99,pb=MOB_TYPE_PRIORITY[b.type]??99;return pa!==pb?pa-pb:a.id-b.id})}
-
-function moveMob(mob,player,region,mobs,simRef){
-  if(mob.hasDig&&mob.digTimer>0){mob.digTimer--;if(mob.digTimer===0){mob.x=mob.digLocation.x;mob.y=mob.digLocation.y;mob.attackDelay=6;mob.frozen=2;mob.digLocation=null;if(player.aggro===mob)player.aggro=null}return}
-  mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
-  if(mob.hasLOS){mob.noLOSTicks=0}else{mob.noLOSTicks=(mob.noLOSTicks||0)+1}
-  if(mob.hasLOS||mob.frozen>0)return;
-  if(mob.hasDig&&!mob.hasLOS&&!mob.digTimer){if((mob.attackDelay<=-38&&Math.random()<0.1)||mob.attackDelay<=-50){startDig(mob,player,region);return}}
-  let dx=mob.x+Math.sign(player.x-mob.x),dy=mob.y+Math.sign(player.y-mob.y);
-  if(collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)){if(Math.random()<0.5){dy=mob.y;dx=mob.x+(Math.random()<0.5?1:-1)}else{dx=mob.x;dy=mob.y+(Math.random()<0.5?1:-1)}}
-  else if(collisionMath(dx,dy,mob.size,player.x,player.y,1)){dy=mob.y}
-  if(mob.attackDelay>mob.atkSpeed)return;
-  let xOff=dx-mob.x,yOff=mob.y-dy;
-  // Diagonal: OSRS-style NPC movement only checks whether the destination footprint is clear.
-  // Do NOT require the intermediate horizontal/vertical components to be clear,
-  // or large NPCs will start their diagonal around pillars one tick too late.
-  let both=canMoveTiles(mob,xOff,yOff,null,region,mobs);
-  let canMoveX=false,canMoveY=false;
-  if(!both){if(xOff!==0)canMoveX=canMoveTiles(mob,xOff,0,null,region,mobs);if(!canMoveX&&yOff!==0)canMoveY=canMoveTiles(mob,0,yOff,null,region,mobs)}
-  if(both){mob.x=dx;mob.y=dy}else if(canMoveX){mob.x=dx}else if(canMoveY){mob.y=dy}
-}
-function canMoveTiles(mob,xOff,yOff,axis_unused,region,mobs){
-  if(xOff===0&&yOff===0)return true;
-  let s=mob.size,dx=xOff,dy=-yOff; // dy: yOff=-1→south(+1), yOff=1→north(-1)
-  let nx=mob.x+dx,ny=mob.y+dy,bl=region.blocked,isNib=mob.type==='nibbler';
-  // Check new column tiles (if moving in x)
-  if(dx===-1)for(let i=0;i<s;i++){if(bl[(nx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(nx,ny-i,1,mobs,mob,true))return false}
-  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++){if(bl[(rx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(rx,ny-i,1,mobs,mob,true))return false}}
-  // Check new row tiles (if moving in y)
-  if(dy===1)for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|ny])return false;if(!isNib&&collidesWithMobs(nx+i,ny,1,mobs,mob,true))return false}
-  else if(dy===-1){let by=ny-s+1;for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|by])return false;if(!isNib&&collidesWithMobs(nx+i,by,1,mobs,mob,true))return false}}
-  return true;
-}
-function startDig(mob,player,region){
-  mob.frozen=6;mob.digTimer=6;let s=mob.size;
-  if(!collidesWithEntities(player.x-s+1,player.y+s-1,s,region.entities))mob.digLocation={x:player.x-s+1,y:player.y+s-1};
-  else if(!collidesWithEntities(player.x,player.y,s,region.entities))mob.digLocation={x:player.x,y:player.y};
-  else if(!collidesWithEntities(player.x-s+1,player.y,s,region.entities))mob.digLocation={x:player.x-s+1,y:player.y};
-  else if(!collidesWithEntities(player.x,player.y+s-1,s,region.entities))mob.digLocation={x:player.x,y:player.y+s-1};
-  else mob.digLocation={x:player.x-1,y:player.y+1};
-}
-function mobAttackStep(mob,player,region,mobs,tick,simRef){
-  if(mob.dead||mob.dying>0||mob.stunned>0)return;
-  mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
-  if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(Math.random()<0.1&&simRef.deadMobs.length>0){let toRes=simRef.deadMobs.shift();toRes.revivedOnce=true;toRes.hp=Math.floor(toRes.maxHp/2);toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
-      let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;toRes.aggroTarget='player';if(!mobs.includes(toRes))mobs.push(toRes);
-      if(!gridMobColumns.find(c=>c.id===toRes.id)){gridMobColumns.push({id:toRes.id,letter:toRes.letter,color:toRes.color,type:toRes.type});sortMobColumns();rebuildTickGridHeader()}
-      mob.attackDelay=mob.atkSpeed*2;tickEvents.push({tick,type:'mager',detail:`Mager resurrected ${toRes.type}!`,mobId:mob.id,isResurrect:true});return}
-    fireAttack(mob,player,region,tick);mob.attackDelay=mob.atkSpeed;return}
-  if(mob.isBlob){if(!mob.hasLOS&&!mob.blobScanPrayer)return;
-    if(mob.hasLOS&&(!mob.hadLOS||(!mob.blobScanPrayer&&mob.attackDelay<=0))){mob.blobScanPrayer='scanned';mob.attackDelay=mob.atkSpeed;
-      // Blob scans prayer: opposite of what's prayed, or random if no sequence
-      let style;
-      let praySeq=activePrayerSeq;
-      if(!praySeq&&playerPlacement){let pk=`${playerPlacement.x},${playerPlacement.y}`;if(autozukResults[pk])praySeq=autozukResults[pk].prayer}
-      if(praySeq){let pray=praySeq[tick%4];
-        if(pray==='mage')style='range';else if(pray==='range')style='magic';else style=Math.random()<0.5?'magic':'range';
-      }else{style=Math.random()<0.5?'magic':'range'}
-      mob.currentStyle=style;
-      tickEvents.push({tick,type:'blob',detail:`Blob SCAN (id:${mob.id}) → ${style}`,mobId:mob.id,isScan:true});recordTickHit(tick,mob.id,mob.type,style,true);return}
-    if(mob.blobScanPrayer&&mob.attackDelay<=0){fireAttack(mob,player,region,tick);mob.blobScanPrayer=null;mob.attackDelay=mob.atkSpeed}return}
-  if(!mob.hasLOS||mob.attackDelay>0)return;if(isUnderMob(mob,player))return;
-  let actualStyle=mob.style;
-  fireAttack(mob,player,region,tick,actualStyle);mob.attackDelay=mob.atkSpeed;
-}
-function isUnderMob(mob,player){return collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)}
-function fireAttack(mob,player,region,tick,overrideStyle){
-  let style=overrideStyle||mob.currentStyle||mob.style;if(style==='blob')style=mob.currentStyle||'magic';
-  if(canUseSecondaryMelee(mob,player)&&Math.random()<0.5)style='melee';
-  let delay=monsterProjectileDelay(mob,style,player);
-  player.incomingProjectiles.push({delay:delay+1,damage:0,mobType:mob.type,mobId:mob.id,style,fireTick:tick});
-  // last_attacker is set when mob fires, not when projectile lands
-  setPlayerLastAttacker(player,mob);
-  recordTickHit(tick,mob.id,mob.type,style,false);
-  tickEvents.push({tick,type:mob.type,detail:`${mob.type} attacks (${style}), pray T${tick}`,mobId:mob.id,isAttack:true,hitTick:tick+delay});
-}
-function movePlayer(player,region,mobs){
-  if(!player.aggro||player.aggro.dead||player.aggro.dying>0||player.aggro.pendingRemovalTick!==undefined)return;
-  let target=player.aggro;
-  // Already in range with LOS? Don't move
-  if(distToMob(player.x,player.y,target)<=player.range&&playerHasLOS(region,player.x,player.y,target,player.range))return;
-  // Destination: closest face tile (melee-adjacent, N/S priority on ties)
-  let dest=getClosestFaceTile(target,player.x,player.y,region);
-  if(!dest)return;
-  // Running: take 2 walk steps per tick
-  let step1=osrsWalkStep(player.x,player.y,dest.x,dest.y,region);
-  if(!step1)return;
-  player.x=step1.x;player.y=step1.y;
-  if(player.x===dest.x&&player.y===dest.y)return;
-  let step2=osrsWalkStep(player.x,player.y,dest.x,dest.y,region);
-  if(step2){player.x=step2.x;player.y=step2.y}
-}
-// BFS pathfinder for player: only entity collision, can walk through mobs
-function playerBFS(sx,sy,tx,ty,region){
-  if(sx===tx&&sy===ty)return null;
-  let bl=region.blocked;
-  let visited=new Uint8Array(4096); // 64×64
-  visited[(sx<<6)|sy]=1;
-  // Directions: W,E,S,N,SW,SE,NW,NE (cardinal first, matches)
-  let queue=[{x:sx,y:sy,parent:null}],qi=0;
-  while(qi<queue.length&&queue.length<2000){
-    let node=queue[qi++];
-    if(node.x===tx&&node.y===ty){
-      // Backtrack to find first step
-      let step=node;while(step.parent&&!(step.parent.x===sx&&step.parent.y===sy))step=step.parent;
-      return{x:step.x,y:step.y};
-    }
-    for(let d=0;d<8;d++){
-      let nx=node.x+BFS_DIRS[d][0],ny=node.y+BFS_DIRS[d][1];
-      if(nx<ARENA_X_MIN||nx>ARENA_X_MAX||ny<ARENA_Y_MIN||ny>ARENA_Y_MAX)continue;
-      let key=(nx<<6)|ny;if(visited[key])continue;
-      if(bl[key])continue;
-      // Diagonal: check both cardinal neighbors
-      if(d>=4){
-        if(bl[((node.x+BFS_DIRS[d][0])<<6)|node.y])continue;
-        if(bl[(node.x<<6)|(node.y+BFS_DIRS[d][1])])continue;
-      }
-      visited[key]=1;
-      queue.push({x:nx,y:ny,parent:node});
-    }
-  }
-  // No path found — try to get as close as possible (backup: direct step)
-  let dx=Math.sign(tx-sx),dy=Math.sign(ty-sy),nx=sx+dx,ny=sy+dy;
-  if(dx!==0&&dy!==0){
-    if(!bl[(nx<<6)|ny]&&!bl[((sx+dx)<<6)|sy]&&!bl[(sx<<6)|(sy+dy)])return{x:nx,y:ny};
-    if(!bl[((sx+dx)<<6)|sy])return{x:sx+dx,y:sy};
-    if(!bl[(sx<<6)|(sy+dy)])return{x:sx,y:sy+dy};
-  }else if(dx!==0&&!bl[(nx<<6)|ny])return{x:nx,y:ny};
-  else if(dy!==0&&!bl[(nx<<6)|ny])return{x:nx,y:ny};
-  return null;
-}
-function playerAttackStep(player,mobs,region,tick){
-  if(player.aggro&&(player.aggro.dead||(player.aggro.dying>0&&tick>player.aggro.dyingStartTick)))player.aggro=null;
-  if(!player.aggro||player.attackDelay>0||player.aggro.pendingRemovalTick!==undefined)return;
-  let loadout=currentLoadout;
-  if(!playerHasLOS(region,player.x,player.y,player.aggro,loadout.range))return;
-  let target=player.aggro;
-  let delay=playerProjectileDelay(loadout,player.x,player.y,target);
-  // Roll accuracy + damage using loadout
-  let accArr=loadout.playerAcc[target.type];
-  let acc=player.lastHit?accArr[0]:accArr[1];
-  let hit=Math.random()<acc;
-  let dmg=0;
-  if(hit){dmg=Math.floor(Math.random()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
-  target.incomingProjectiles.push({delay,damage:dmg});
-  // Blood barrage: heal 25% at cast time + 3x3 AOE
-  if(loadout.isBloodBarrage){
-    if(dmg>0&&player.hp<player.maxHp){player.hp=Math.min(player.maxHp,player.hp+Math.floor(dmg*0.25))}
-    let aoeOffsets=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
-    let hitCount=1;
-    for(let off of aoeOffsets){
-      if(hitCount>=9)break;
-      let ax=target.x+off[0],ay=target.y+off[1];
-      for(let m of mobs){
-        if(m.dead||m.dying>0||m===target)continue;
-        if(m.x===ax&&m.y===ay){
-          hitCount++;
-          let sAccArr=loadout.playerAcc[m.type];
-          let sAcc=player.lastHit?sAccArr[0]:sAccArr[1];
-          let sHit=Math.random()<sAcc;
-          let sDmg=sHit?Math.floor(Math.random()*(loadout.maxHit+1)):0;
-          let sDelay=playerProjectileDelay(loadout,player.x,player.y,m);
-          m.incomingProjectiles.push({delay:sDelay,damage:sDmg});
-          if(sDmg>0&&player.hp<player.maxHp){player.hp=Math.min(player.maxHp,player.hp+Math.floor(sDmg*0.25))}
-          break;
-        }
-      }
-    }
-  }
-  player.attackDelay=loadout.atkSpeed;
-  // Track barrage splash visual (Phase 1 rendering only)
-  if(loadout.isBloodBarrage&&dmg>0){player.lastBarrageTarget={x:target.x,y:target.y,tick};}
-  tickEvents.push({tick,type:'player-atk',detail:`Player → ${target.type} #${target.id}, ${dmg}dmg hits T${tick+delay}`,mobId:target.id,isPlayerAttack:true});
-}
-function spawnBlobletsFromBlob(blob,tick,simRef){
-  let mobs=simRef.mobs;
-  let bm=createMob('blobletMage',blob.x+2,blob.y-2,mobIdCounter++);bm.aggroTarget='player';bm.stunned=0;bm.frozen=1;bm.attackDelay=4;bm.parentBlobId=blob.id;mobs.push(bm);
-  let br=createMob('blobletRange',blob.x+1,blob.y-1,mobIdCounter++);br.aggroTarget='player';br.stunned=0;br.frozen=1;br.attackDelay=4;br.parentBlobId=blob.id;mobs.push(br);
-  let bx=createMob('blobletMelee',blob.x,blob.y,mobIdCounter++);bx.aggroTarget='player';bx.stunned=0;bx.frozen=1;bx.attackDelay=4;bx.parentBlobId=blob.id;mobs.push(bx);
-  for(let bl of[bm,br,bx])gridMobColumns.push({id:bl.id,letter:bl.letter,color:bl.color,type:bl.type});
-  sortMobColumns();rebuildTickGridHeader();
-  tickEvents.push({tick,type:'blob',detail:`Bloblets spawn (frozen this tick)`,mobId:blob.id});
-}
-function processDelayedBlobletSpawns(simRef,tick){
-  let pending=simRef.delayedBlobletSpawns||[];
-  if(pending.length===0)return;
-  let keep=[];
-  for(let item of pending){
-    if(item.tick<=tick)spawnBlobletsFromBlob(item.blob,tick,simRef);
-    else keep.push(item);
-  }
-  simRef.delayedBlobletSpawns=keep;
-}
-function onMobDeath(mob,player,region,mobs,tick,simRef){
-  if(mob.isBlob){
-    if(!simRef.delayedBlobletSpawns)simRef.delayedBlobletSpawns=[];
-    simRef.delayedBlobletSpawns.push({tick:tick+1,blob:mob});
-    tickEvents.push({tick,type:'blob',detail:`Blob died → bloblets spawn T${tick+1}`,mobId:mob.id});
-  }
-  if(!mob.type.startsWith('bloblet')&&mob.type!=='nibbler'&&!mob.revivedOnce)simRef.deadMobs.push(mob);
-  if(player.aggro===mob)player.aggro=null;
-  if(player.lastAttacker===mob)player.lastAttacker=null;
-}
 function findRespawnLocation(size,region,mobs){for(let x=16;x<23;x++)for(let y=11;y<24;y++)if(!collidesWithMobs(x,y,size,mobs,null)&&!collidesWithEntities(x,y,size,region.entities))return{x,y};return{x:11,y:9}}
+
+// ===== SEEDED PRNG =====
+function mulberry32(seed){
+  let s = seed >>> 0;
+  return function(){
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 // =====================================================
 // PHASE 2: HEADLESS SIMULATION ENGINE
@@ -939,8 +534,9 @@ function hlCreatePlayer(x,y,loadout){
     incomingProjectiles:[],autoRetaliate:true,lastHit:true,hp:99,maxHp:99,
     recoilQueue:[],echoBootsCooldown:0,lastAttacker:null};
 }
-function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion){
+function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed){
   let idCounter=0;
+  let rng = (seed===undefined||seed===null) ? Math.random : mulberry32(seed);
   let region=cachedRegion||createRegion(pillarConfig);
   let parsed=parseSpawnCode(spawnCode);if(parsed.error)return null;
   let mobs=[],player=hlCreatePlayer(playerPos.x,playerPos.y,loadout),deadMobs=[];
@@ -954,7 +550,7 @@ function hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion){
   let mobInitHP={};
   let mobMap=new Map();
   for(let m of mobs){mobInitHP[m.id]={hp:m.hp,type:m.type};mobMap.set(m.id,m)}
-  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[]};
+  return{region,mobs,player,tick:0,deadMobs,idCounter,loadout,attacks:[],mobTypes:new Set(mobs.map(m=>m.type)),mobInitHP,mobMap,delayedBlobletSpawns:[],rng};
 }
 function hlMarkMobForProjectileRemoval(mob,tick){
   if(mob.dead)return;
@@ -1031,9 +627,9 @@ function hlTick(S){
     // Confliction Gauntlets: accuracy depends on last hit/miss
     let accArr=loadout.playerAcc[target.type];
     let acc=player.lastHit?accArr[0]:accArr[1];
-    let hit=Math.random()<acc;
+    let hit=S.rng()<acc;
     let dmg=0;
-    if(hit){dmg=Math.floor(Math.random()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
+    if(hit){dmg=Math.floor(S.rng()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
     target.incomingProjectiles.push({delay,damage:dmg});
     // Record player attack event for post HP calculation. Damage is rolled now,
     // but mob HP/death is applied when the projectile lands.
@@ -1052,8 +648,8 @@ function hlTick(S){
             hitCount++;
             let sAccArr=loadout.playerAcc[m.type];
             let sAcc=player.lastHit?sAccArr[0]:sAccArr[1];
-            let sHit=Math.random()<sAcc;
-            let sDmg=sHit?Math.floor(Math.random()*(loadout.maxHit+1)):0;
+            let sHit=S.rng()<sAcc;
+            let sDmg=sHit?Math.floor(S.rng()*(loadout.maxHit+1)):0;
             let sDelay=playerProjectileDelay(loadout,player.x,player.y,m);
             m.incomingProjectiles.push({delay:sDelay,damage:sDmg});
             S.attacks.push({tick:t,isPlayerAttack:true,playerDmg:sDmg,targetMobId:m.id,targetMobType:m.type,hitTick:t+sDelay});
@@ -1071,9 +667,9 @@ function hlMoveMob(mob,player,region,mobs,S){
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasLOS){mob.noLOSTicks=0}else{mob.noLOSTicks++}
   if(mob.hasLOS||mob.frozen>0)return;
-  if(mob.hasDig&&!mob.hasLOS&&!mob.digTimer){if((mob.attackDelay<=-38&&Math.random()<0.1)||mob.attackDelay<=-50){startDig(mob,player,region);return}}
+  if(mob.hasDig&&!mob.hasLOS&&!mob.digTimer){if((mob.attackDelay<=-38&&S.rng()<0.1)||mob.attackDelay<=-50){startDig(mob,player,region);return}}
   let dx=mob.x+Math.sign(player.x-mob.x),dy=mob.y+Math.sign(player.y-mob.y);
-  if(collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)){if(Math.random()<0.5){dy=mob.y;dx=mob.x+(Math.random()<0.5?1:-1)}else{dx=mob.x;dy=mob.y+(Math.random()<0.5?1:-1)}}
+  if(collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)){if(S.rng()<0.5){dy=mob.y;dx=mob.x+(S.rng()<0.5?1:-1)}else{dx=mob.x;dy=mob.y+(S.rng()<0.5?1:-1)}}
   else if(collisionMath(dx,dy,mob.size,player.x,player.y,1)){dy=mob.y}
   if(mob.attackDelay>mob.atkSpeed)return;
   let xOff=dx-mob.x,yOff=mob.y-dy;
@@ -1098,14 +694,14 @@ function hlMobAttack(mob,player,region,mobs,tick,S){
   if(mob.dead||mob.dying>0||mob.stunned>0)return;
   mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
   if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
-    if(Math.random()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+    if(S.rng()<0.1&&S.deadMobs.length>0){let toRes=S.deadMobs.shift();toRes.revivedOnce=true;let reviveHp=Math.floor(toRes.maxHp/2);toRes.hp=reviveHp;toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
       let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;if(!mobs.includes(toRes))mobs.push(toRes);
       S.attacks.push({tick,mobId:toRes.id,mobType:toRes.type,isRevive:true,reviveHp});
       mob.attackDelay=mob.atkSpeed*2;return}
     hlFireAttack(mob,player,tick,S);mob.attackDelay=mob.atkSpeed;return}
   if(mob.isBlob){if(!mob.hasLOS&&!mob.blobScanPrayer)return;
     if(mob.hasLOS&&(!mob.hadLOS||(!mob.blobScanPrayer&&mob.attackDelay<=0))){mob.blobScanPrayer='scanned';mob.attackDelay=mob.atkSpeed;mob._lastScanTick=tick;
-      mob.currentStyle=Math.random()<0.5?'magic':'range';
+      mob.currentStyle=S.rng()<0.5?'magic':'range';
       S.attacks.push({tick,mobId:mob.id,mobType:'blob',style:null,isScan:true,scanTick:tick,accRoll:0,dmgRoll:0});return}
     if(mob.blobScanPrayer&&mob.attackDelay<=0){hlFireAttack(mob,player,tick,S,'blob_attack',mob._lastScanTick||tick-3);mob.blobScanPrayer=null;mob.attackDelay=mob.atkSpeed}return}
   if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
@@ -1119,7 +715,7 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
   // Calculate projectile delay for auto-retaliate timing. Blob damage style remains
   // prayer-resolved post-hoc unless the blob rolls its secondary melee here.
   let projectileStyle=isBlob?(mob.currentStyle||'magic'):style;
-  if(canUseSecondaryMelee(mob,player)&&Math.random()<0.5){projectileStyle='melee';style='melee';isBlob=false}
+  if(canUseSecondaryMelee(mob,player)&&S.rng()<0.5){projectileStyle='melee';style='melee';isBlob=false}
   let delay=monsterProjectileDelay(mob,projectileStyle,player);
   let edgeDist=distToMob(player.x,player.y,mob);
   player.incomingProjectiles.push({delay:delay+1,damage:0,mobType:mob.type,mobId:mob.id,style:projectileStyle});
@@ -1128,7 +724,7 @@ function hlFireAttack(mob,player,tick,S,styleOrBlobFlag,scanTick){
   // Record attack event for prayer analysis
   S.attacks.push({tick,mobId:mob.id,mobType:mob.type,style:isBlob?null:style,isScan:false,
     scanTick:isBlob?(scanTick||tick-3):-1,
-    accRoll:Math.random(),dmgRoll:Math.random(),distAtFire:edgeDist,hitTick:tick+delay});
+    accRoll:S.rng(),dmgRoll:S.rng(),distAtFire:edgeDist,hitTick:tick+delay});
 }
 function hlSpawnBlobletsFromBlob(blob,tick,S){
   let mobs=S.mobs;
@@ -1161,8 +757,8 @@ function hlOnDeath(mob,player,region,mobs,tick,S){
   if(player.lastAttacker===mob)player.lastAttacker=null;
 }
 
-function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion){
-  let S=hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion);if(!S)return null;
+function hlRunSim(spawnCode,playerPos,pillarConfig,loadout,maxTicks,cachedRegion,seed){
+  let S=hlInitState(spawnCode,playerPos,pillarConfig,loadout,cachedRegion,seed);if(!S)return null;
   let prevDeadCount=0;
   for(let i=0;i<maxTicks;i++){
     hlTick(S);
@@ -1391,6 +987,530 @@ function calcSimDamage(attacks,prayerSeq,loadout,mobInitHP){
   }
   return{damage:died?99:(loadout.isBloodBarrage?Math.max(0,99-minHp):Math.max(0,99-hp)),died:died};
 }
+// ===== Phase-1-shared helpers (also called from hl* in sim-core) =====
+function canSetLastAttacker(player,mob){let a=player.aggro;return !a||a.dead||a===mob}
+function setPlayerLastAttacker(player,mob){
+  // While the player is already engaged, other NPCs do not steal last_attacker.
+  if(canSetLastAttacker(player,mob))player.lastAttacker=mob;
+}
+function startDig(mob,player,region){
+  mob.frozen=6;mob.digTimer=6;let s=mob.size;
+  if(!collidesWithEntities(player.x-s+1,player.y+s-1,s,region.entities))mob.digLocation={x:player.x-s+1,y:player.y+s-1};
+  else if(!collidesWithEntities(player.x,player.y,s,region.entities))mob.digLocation={x:player.x,y:player.y};
+  else if(!collidesWithEntities(player.x-s+1,player.y,s,region.entities))mob.digLocation={x:player.x-s+1,y:player.y};
+  else if(!collidesWithEntities(player.x,player.y+s-1,s,region.entities))mob.digLocation={x:player.x,y:player.y+s-1};
+  else mob.digLocation={x:player.x-1,y:player.y+1};
+}
+function isUnderMob(mob,player){return collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)}
+// BFS pathfinder for player: only entity collision, can walk through mobs
+function playerBFS(sx,sy,tx,ty,region){
+  if(sx===tx&&sy===ty)return null;
+  let bl=region.blocked;
+  let visited=new Uint8Array(4096); // 64×64
+  visited[(sx<<6)|sy]=1;
+  // Directions: W,E,S,N,SW,SE,NW,NE (cardinal first, matches)
+  let queue=[{x:sx,y:sy,parent:null}],qi=0;
+  while(qi<queue.length&&queue.length<2000){
+    let node=queue[qi++];
+    if(node.x===tx&&node.y===ty){
+      // Backtrack to find first step
+      let step=node;while(step.parent&&!(step.parent.x===sx&&step.parent.y===sy))step=step.parent;
+      return{x:step.x,y:step.y};
+    }
+    for(let d=0;d<8;d++){
+      let nx=node.x+BFS_DIRS[d][0],ny=node.y+BFS_DIRS[d][1];
+      if(nx<ARENA_X_MIN||nx>ARENA_X_MAX||ny<ARENA_Y_MIN||ny>ARENA_Y_MAX)continue;
+      let key=(nx<<6)|ny;if(visited[key])continue;
+      if(bl[key])continue;
+      // Diagonal: check both cardinal neighbors
+      if(d>=4){
+        if(bl[((node.x+BFS_DIRS[d][0])<<6)|node.y])continue;
+        if(bl[(node.x<<6)|(node.y+BFS_DIRS[d][1])])continue;
+      }
+      visited[key]=1;
+      queue.push({x:nx,y:ny,parent:node});
+    }
+  }
+  // No path found — try to get as close as possible (backup: direct step)
+  let dx=Math.sign(tx-sx),dy=Math.sign(ty-sy),nx=sx+dx,ny=sy+dy;
+  if(dx!==0&&dy!==0){
+    if(!bl[(nx<<6)|ny]&&!bl[((sx+dx)<<6)|sy]&&!bl[(sx<<6)|(sy+dy)])return{x:nx,y:ny};
+    if(!bl[((sx+dx)<<6)|sy])return{x:sx+dx,y:sy};
+    if(!bl[(sx<<6)|(sy+dy)])return{x:sx,y:sy+dy};
+  }else if(dx!==0&&!bl[(nx<<6)|ny])return{x:nx,y:ny};
+  else if(dy!==0&&!bl[(nx<<6)|ny])return{x:nx,y:ny};
+  return null;
+}
+</script>
+<script id="autozuk-worker" type="text/worker-source">
+// === AUTOZUK Worker ===
+// Messages in:
+//   {type:'init', pillarConfig, loadout}
+//   {type:'exclude', tiles:[{x,y}], spawnCode}
+//   {type:'simulate', tile:{x,y}, spawnCode, loadout, maxTicks, maxSims, seedBase}
+// Messages out:
+//   {type:'init-ok'}
+//   {type:'exclude-result', excluded:[{x,y}], eligible:[{x,y}]}
+//   {type:'simulate-result', tile, summary} where summary matches autozukResults[key]
+let W = { region: null, pillarConfig: null, loadout: null };
+self.onmessage = function(e){
+  let msg = e.data;
+  if(msg.type === 'init'){
+    W.pillarConfig = msg.pillarConfig;
+    W.loadout = msg.loadout;
+    W.region = createRegion(msg.pillarConfig);
+    self.postMessage({type:'init-ok'});
+    return;
+  }
+  if(msg.type === 'exclude'){
+    let parsed = parseSpawnCode(msg.spawnCode);
+    let testMobs = [];
+    if(!parsed.error){
+      for(let spawn of parsed.spawns){
+        if(spawn.type==='nothing')continue;
+        testMobs.push({x:spawn.x,y:spawn.y,size:MOB_DEFS[spawn.type].size,type:spawn.type,range:MOB_DEFS[spawn.type].range,dead:false});
+      }
+    }
+    let excluded = [], eligible = [];
+    for(let t of msg.tiles){
+      if(checkTileExcluded(t.x,t.y,testMobs,W.region)) excluded.push(t);
+      else eligible.push(t);
+    }
+    self.postMessage({type:'exclude-result', excluded, eligible});
+    return;
+  }
+  if(msg.type === 'simulate'){
+    let tile = msg.tile;
+    let loadout = msg.loadout;
+    let maxTicks = msg.maxTicks;
+    let maxSims = msg.maxSims;
+    let seedBase = msg.seedBase;
+    let allResults = [];
+    for(let s=0;s<maxSims;s++){
+      let seed = (seedBase ^ (tile.x*73856093) ^ (tile.y*19349663) ^ (s*83492791)) >>> 0;
+      let result = hlRunSim(msg.spawnCode, tile, W.pillarConfig, loadout, maxTicks, W.region, seed);
+      if(result) allResults.push(result);
+      if(s===2 && allResults.length>=3){
+        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+        let allDead = allResults.every(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).died);
+        if(allDead) break;
+      }
+      if(s===9 && allResults.length>=10){
+        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+        let quickDmgs = allResults.map(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).damage);
+        let quickAvg = quickDmgs.reduce((a,b)=>a+b,0)/quickDmgs.length;
+        if(quickAvg>80) break;
+      }
+    }
+    if(allResults.length === 0){
+      self.postMessage({type:'simulate-result', tile, summary: null});
+      return;
+    }
+    let prayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+    let damages = [], completionTicks = [];
+    let invalidCount = 0, deathCount = 0;
+    for(let r of allResults){
+      if(r.status==='invalid'){invalidCount++; continue;}
+      let res = calcSimDamage(r.attacks, prayer.sequence, loadout, r.mobInitHP);
+      if(res.died) deathCount++;
+      damages.push(res.damage); completionTicks.push(r.completedTick);
+    }
+    let deathPct = damages.length>0 ? (deathCount/damages.length*100) : 0;
+    let avgDmg = damages.length>0 ? damages.reduce((a,b)=>a+b,0)/damages.length : 999;
+    let over50 = damages.filter(d=>d>50).length;
+    let avgTicks = completionTicks.length>0 ? completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length : maxTicks;
+    let isMostlyDead = deathPct > 30;
+    let invalidPct = allResults.length>0 ? (invalidCount/allResults.length*100) : 0;
+    let isMostlyInvalid = invalidPct > 20;
+    let summary = {
+      avgDamage: avgDmg, damages, completionTicks,
+      over50Pct: damages.length>0 ? (over50/damages.length*100) : 100,
+      avgTicks, avgTime: (avgTicks*0.6).toFixed(1),
+      prayer: prayer.sequence, invalidPct,
+      totalSims: allResults.length, deathPct, markedDead: isMostlyDead || isMostlyInvalid
+    };
+    self.postMessage({type:'simulate-result', tile, summary});
+    return;
+  }
+};
+</script>
+<script>
+// =====================================================
+// AUTOZUK — Phase 1 Sim Engine + Phase 2 Solver
+// =====================================================
+
+
+function isDarkColor(c){let r=parseInt(c.slice(1,3),16),g=parseInt(c.slice(3,5),16),b=parseInt(c.slice(5,7),16);return(r*299+g*587+b*114)/1000<128}
+
+let currentLoadout = LOADOUTS.blowpipe;
+
+// ===== PHASE 1: STATE =====
+let sim=null,pillars={S:true,W:true,N:true},playerPlacement=null;
+let playing=false,playInterval=null;
+let tickEvents=[],mobIdCounter=0;
+let tickHits={},gridMobColumns=[];
+let previewMobs=[];
+let tickGridUserScrolled=false,eventListUserScrolled=false;
+
+// ===== PHASE 2: STATE =====
+let autozukRunning=false, autozukResults={}, autozukMode=false, autozukHidden=false;
+let selectedTile=null, excludedTiles=new Set();
+let activePrayerSeq=null; // 4-slot prayer sequence for tick grid display
+let facingSouth=true;
+const FLOOR_RAW='311d25,2f1c24,301b22,311c24,311c22,301a20,301a1f,311b20,301b20,301b20,301c21,301c21,301c23,301c23,301c23,301c23,2f1c23,2e1b22,301d23,301c22,321e24,2c171d,311b21,311b21,321c23,321c23,311c22,301c21,2f1c23|2e1b23,2e1b23,2e1b22,311c23,311c22,301b21,311b20,311c21,311b20,311c21,311c22,311d23,301d24,311d24,311d24,311d24,321f26,301c23,2d1a20,2d1a20,321d23,301c21,321d23,311c22,311c22,311c22,301c21,301c21,2f1c23|2d1b23,301d25,301e24,301c23,2f1c21,301c21,311d21,311d21,321e23,321e23,331e23,331f24,332025,332026,332026,332026,342229,332127,301e23,311e24,311d23,311e24,311c22,311c22,301c21,301c21,301c21,301c21,2f1c23|2c1b23,2e1d25,2f1e25,2e1c22,2d1b20,301c22,321f23,331e23,352125,352125,362226,372227,362327,372428,372428,362429,342328,332329,342429,352328,301e23,301d23,2c181e,301b21,301b21,301b21,301c21,301c21,301c23|2c1b23,2d1d24,2d1d24,2c1b21,2d1c21,311e24,342125,352226,362327,372426,382529,39262a,39272a,3a272b,39282b,38282b,3b2b2f,322327,332327,332327,36252a,37252a,321e24,342127,301c21,301c21,301c21,301c21,301c21|2f2027,2e1e26,2d1e25,2f1f25,302025,312124,332225,362326,382628,392728,3b2829,3c2a2b,3d2b2b,3d2b2c,3d2b2c,3c2c2d,36282a,1d1014,1a0c14,1c0d14,302024,332327,2e1c21,2f1c21,301d23,311d23,311c22,301c21,301c21|291b22,26181f,281a20,302126,342429,342327,342326,382628,3c2a2b,3d2c2b,3e2d2c,402f2e,41302e,41302e,41302e,3f312f,3e3232,1a0d14,160b14,180b14,38292c,3b2b2e,36262a,362329,321e24,311e24,301d23,2f1c21,2e1b21|1a0d14,170b14,1d1016,2b1d22,34262a,362629,382829,3c2c2c,3f2e2d,402f2d,42312e,433230,443430,443430,443430,433431,403432,170d14,170c14,180c14,3b2d2f,38292c,362529,342429,322025,321e24,301d23,2f1c21,2e1b21|180b14,160b14,1a0c14,302326,36272a,392a2c,372727,3e2e2e,40312e,42332f,443630,463731,483932,493b34,493a32,473a32,453a34,423834,413532,3e3330,3e302f,3b2c2d,38282b,362529,352328,332126,311e24,2f1c21,2e1b21|190b14,180b14,1c0f14,2e2125,362729,3b2c2d,3c2c2b,433330,443430,463730,493a32,4a3c33,4c3e35,4d4035,4d4035,4b3e35,483e35,463c35,443933,423632,413330,3e2f2f,3b2b2c,38272a,362428,342227,321e24,301c22,2f1c21|2f2026,2f2026,302126,38292c,3a2b2c,3d2e2e,3e2e2c,43332f,483932,4a3c33,4d4035,4f4236,514438,524639,524639,514537,4d4337,4b4136,493e35,463a32,443731,413230,3d2d2e,3c2a2c,38262a,362327,332025,311d23,301c22|312128,322329,35252a,39292c,3b2b2c,3f302d,43332f,473831,4b3d34,4e3f34,514437,534739,554a3a,574c3b,574c3b,554b3a,524839,504637,4c4235,4a3d34,473931,433430,41302e,3d2c2c,3b282b,382529,342127,321e24,301d23|2d1c23,312125,362629,382829,3c2c2c,42312e,483732,4a3b33,4d3f35,514336,54483a,584c3b,5a4f3c,5b523e,5b523e,59503c,574d3a,554939,514637,4d4133,4a3c32,473630,42312f,3f2d2d,3c292b,39272b,362228,321f25,301e23|332126,352528,3c2b2e,3c2a2c,402f2e,42312d,483831,4a3a31,504236,544639,584c3b,5c513e,5e5440,5f5740,5f5740,5d553f,5d523d,5a4e3b,554938,514336,4d3e32,493931,44332f,412f2f,3d2a2c,3a272b,362327,332025,311e24|311e24,322024,39272a,3a2829,412f2e,42302c,493932,4c3c32,524437,56493a,5a4e3c,5e533f,605741,635a43,625a42,605841,5f553e,5d513c,584c39,544535,4f3f33,4a3931,46342f,42302f,3d2b2c,3b282b,362327,332025,311f25|362329,362327,3c292c,3b292a,43312f,41312c,4a3933,4c3d33,524437,564a39,5b503d,5e5540,625943,645c44,635d44,625a42,605640,5e513d,594c3a,544636,4f3f33,4a3a31,45342f,42312e,3d2b2c,3b282a,362327,332025,321e25|342125,362327,39272a,3d2b2c,402f2e,433431,483934,4b3e34,53463a,534838,5c5140,5e5541,625943,625a42,645e45,635b44,605542,5d513f,584c3b,534638,4e3f34,493a32,44352f,42312e,3d2c2b,3a282a,362327,332024,321e24|332125,362326,38272a,3c2b2b,3e2e2e,433330,473933,4a3d35,504439,55493c,564c3c,5f5543,5d5440,675e48,615a42,5f5741,5f5442,5c5040,574a3c,524638,4d4035,483b32,44352f,41322f,3d2c2b,3a282a,362327,332024,331e24|322024,352226,382629,3b292a,3e2e2d,42322f,463833,493c34,4f4239,54483c,554b3c,5d5342,5a523f,605744,5d543f,5e5540,5c5140,594d3d,55483a,504337,4c3e35,483932,433430,40312e,3c2b2a,39282a,362327,332024,321e24|322024,342225,372629,3b292a,3d2d2c,41312f,463632,483934,4d3f37,4f4337,564a3d,574c3d,5b5141,544c3a,584f3c,5c5240,584c3c,55493b,514437,4d4035,4a3b34,463730,41322e,3e2f2c,3b292a,392729,362326,322024,321d23|321f23,342125,362527,39282a,3c2b2b,3f2f2e,433431,463833,463830,4d4138,4f4239,4e4437,564c3d,5b5142,574d3e,53493a,53473a,514438,4e4036,4a3c33,473831,43342f,41302d,3e2d2b,3a2829,372627,342225,321f23,301d23|311e23,332024,352326,382628,3a282a,3e2c2d,41312f,433431,483a35,493c34,221514,170b14,1c0f14,4c4136,51463a,53473b,4f4237,4d4035,4a3c33,483931,453630,42322e,3f2e2c,3c2b2a,382628,362427,332024,311d23,301c23|301d21,321f23,342125,362326,382628,3b292a,3e2e2d,41312f,423330,463833,1a0b14,160b14,180b14,50433b,4a3e35,493d34,4a3d34,493b33,473831,443630,43322e,402f2c,3c2b2a,392829,372427,342226,321f23,301c22,2f1c23|2f1c20,311e22,332024,352226,362527,39282a,3c2c2c,3e2e2e,413130,423230,1c0d14,1a0b14,1e1014,483b35,443730,483934,473831,463730,43342f,41322e,402f2c,3d2c2a,392829,372527,362327,332125,311e24,2f1c21,2e1b22|301d21,301d21,311e22,332024,352326,382628,3b292b,3c2b2b,3d2d2e,3e2e2e,413130,423331,433431,433431,433431,423430,42332f,43322e,41302e,3f2e2c,3c2b2a,392829,382527,372427,332024,321e24,301d24,2f1c23,2e1b22|2f1c21,2f1c20,301d21,321f23,332125,362527,38272a,39282a,3b2b2c,3c2c2c,3d2d2e,3f2f2f,403030,3f312f,3f312f,3f302e,402f2d,3f2e2c,3e2d2c,3c2b2a,392829,372627,362326,342226,321e24,311e24,301d24,2f1c23,2e1b22|2e1b22,2e1b21,2f1c21,301d23,321e24,332125,352327,362527,382629,392729,3b292b,3b2b2c,3c2c2d,3c2c2c,3c2c2c,3c2c2c,3c2b2b,3c2a2a,3b2829,392629,372528,352226,332125,321f25,301d23,301d24,301c24,2f1c24,2f1c23|2e1b22,2e1b22,2e1b22,2f1c21,301d23,311e24,322025,322024,352327,362427,372629,382729,382829,38282a,382829,392729,392629,382628,372527,362327,342226,332025,321e24,311e25,2f1c23,2f1c23,2f1c24,2f1c24,2f1c23|2f1c24,2f1c23,2f1c23,2f1c23,301c23,301d23,311d23,311e23,332024,332124,342225,352326,362426,362426,362426,362426,362326,372226,362125,342025,322024,311e24,301d24,301c24,2e1b23,2e1b23,2f1c24,2f1c24,301c24|301c24,2f1c24,2f1c23,2f1c23,2f1c23,301c23,301c22,301d23,311e23,321f23,322023,322124,332123,332123,332123,332123,352125,342024,331f24,321e23,301d23,301c22,2f1c24,2e1b23,2f1c24,2f1c24,2f1c24,2f1c24,2f1c24'.split('|').map(r=>r.split(',').map(c=>'#'+c));
+function drawFlipText(t,x,y){if(facingSouth){ctx.save();ctx.translate(x,y);ctx.scale(-1,-1);ctx.fillText(t,0,0);ctx.restore()}else ctx.fillText(t,x,y)}
+function drawHealthBar(bx,byAbove,byBelow,bw,pct){
+  if(facingSouth){
+    // Draw below mob in canvas coords (appears above after flip), counter-rotate fill
+    ctx.save();ctx.translate(bx+bw/2,byBelow+1.5);ctx.scale(-1,-1);
+    ctx.fillStyle='#ff0000';ctx.fillRect(-bw/2,-1.5,bw,3);
+    ctx.fillStyle='#00ff00';ctx.fillRect(-bw/2,-1.5,Math.max(0,bw*pct),3);
+    ctx.restore();
+  }else{
+    ctx.fillStyle='#ff0000';ctx.fillRect(bx,byAbove,bw,3);
+    ctx.fillStyle='#00ff00';ctx.fillRect(bx,byAbove,Math.max(0,bw*pct),3);
+  }
+}
+
+
+// ===== PRAYER ICONS (base64) =====
+const PRAYER_IMG_DATA={
+  mage:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAbABsDASIAAhEBAxEB/8QAGAAAAwEBAAAAAAAAAAAAAAAAAAUHBgj/xAAmEAABAwQCAQQDAQAAAAAAAAABAgMFBAYREgAHMRQhIkEyUXFi/8QAFwEBAAMAAAAAAAAAAAAAAAAABQIDBv/EACgRAAEDAgQEBwAAAAAAAAAAAAECESEDBAAFMUEiUXLwBhMUMkJhcf/aAAwDAQACEQMRAD8A4y4ce2Rac5eU61DQFGamqdOB9JT58n68H+AEnABItVgdUW9DTzYlK9i5KxlIqnfQqUqnjmUpC1uvKT8XAkHGraiVH2StCgNqri5oWoCq62eQBKiHbhTqZgGA8EjCuXZPc35emGSNTsBz7h4fE3t6xKiPjG7qvFh+NhPNOpTYUp9wH4jQ/k3sNFke6MjIyQDkLir6aTmqqvo42njGHlbIpGCS2yMAapz74/uT+yfPNn3R2LX3pJNR6VqRDRilN0TO4WB7kFQIASAf8gDGAAlIQhE84hVrK8pNEpCWckAvLnVTByAwJACXdnDEwv10kH09D2g67k/vLuYx0nSzMjEdaWpQxRYpW5K3x6xxqmbDzwNQ6kpU6E76kNoBTtggYxji7sicjrF6+ct+iq/UXJcFOxUVS0tjFLTKAcQ2lRG2xyhalAgbJQkbaqPJdD9pdhw8XTxcVd8rRUVMjRlhl7VCE/oAcQ3LcEzcsoZSekX5GtUgIU+8crUkeAT944FSy1AzBd5UL8Slp6ip0E9A0b5BJ0DF648TINmbegkgkCYb703LAvJgbRhZw4cOJYx+P//Z',
+  range:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAYABgDASIAAhEBAxEB/8QAGQABAQEAAwAAAAAAAAAAAAAAAAYEAwUI/8QAKhAAAgEEAQEGBwEAAAAAAAAAAQIDAAQREgUiBhMxMkFRFCElQ2FykqH/xAAVAQEBAAAAAAAAAAAAAAAAAAAEBf/EACURAAIBAQcFAQEAAAAAAAAAAAECESEAAwQSMUFRBWFxkdGB4f/aAAwDAQACEQMRAD8A8ZV2/ZWwt+Q5PS6DPHGFbuwde8ZpERVLeKrs4yQCcA4+dYuLsLjkbsW9uFBALu7nVI0Hi7H0Ue9Vn0/iuK+4LAP+k3ISr/qop/j8yHoo4HCM83pgATE6TyewMFvwVJALsJhi83hoBOuk/BSfVSQDy9qOBUpKDCkYjWS4t7i2gjVJEWPLqyDDBQy9LdXnAJJIJVN8p2gvuQtDavrHGxBk1eR2kx5QzOzEqDkhc4yScZpRr68LqgdszgVaInj0N4E8cnvXzKoY5mGp0nj0N4E8WobO5sYOM0f4YwmCKRliuYIttIA2Dqe8MhlBXqzjYkDbVlkeUv7jkbs3FwVBACIiDVI0Hgij0Ue1KVT6qWRVQMYavweBWBtJ5s/qDsFVZoa/zwNh3NstKUqJaVb/2Q==',
+  melee:'data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAeAB4DASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAABQADBgcIBP/EACcQAAICAQQBAwQDAAAAAAAAAAECAwQRBQYSIQAHEzIVIjFBYXFi/8QAFwEBAQEBAAAAAAAAAAAAAAAABAUBA//EAC8RAAEDAgQDBAsAAAAAAAAAAAECAxEhMRIiMkEABAUTM1HwQlJhYnGBkaGxweH/2gAMAwEAAhEDEQA/AMZeF9s7d1HcNg1tMjeewXCRwRQSzSyMVdsKkaMxwsbE9dAeCPJ7sptW2tNFfo2rFHVorMFkTwkhqIHIAP0QzyKzqIiDkE5H687tNLWha0gZUk5pAxQcIMVqqLVubA8J5ZsKJUvSBX6UHxJ8xPArStLrVu4p6epW5UyjKPcgrIR83DAcpPyAhHWMn9eObqSj9IZqcWfamhjklNeJMS8Zi6q0aLkYEZwckE+XxvbUdu+sHpre3LX06lo3qHt1Bb12GiYxNbpqBHO6vzAZVRQw58njMYQfNWfOO6rDvq01FQsdWjI8FeFOlRQxGf5Y4ySeyfDdI6yvqDDq3EdkWzgLUzmInET6QIqlW9AIAoxa0paJTpsAN5mp/s1gClpZ6abK1TWLqHTa3v3QiTPOU5wabE3azSn4+4QCUUkAY5HAHUk3la0PRKkuh6ROTWpOyXtSzzd5W+axkgc53wMseowB0pH2i9q+rOobc2da21pVyejBdMbz2IaYNqNhDFE4il90BcrF03DI5EjBAIrvWNSfUJI1WNa9WAcK9dD9sS/6x/JY9k+XuYQGAC4Mg0p9b3lfad7JEC2PJDQGMZRpHj7T+99hAt1XNw2puEMNenDThyK9dq0coiX+3Ukk4yT+z34Lszy2bMtiZucsrl3bAGWJyT1434vJb/NPP94on8fIWEWEWFOAuvuO61E+fDj/2Q=='
+};
+
+// ===== AUDIO SYSTEM =====
+let audioCtx=null;
+function ensureAudio(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();return audioCtx}
+function playExclusionBlip(){
+  let ac=ensureAudio(),t=ac.currentTime;
+  let osc=ac.createOscillator(),gain=ac.createGain();
+  osc.connect(gain);gain.connect(ac.destination);
+  osc.type='square';osc.frequency.setValueAtTime(1800,t);osc.frequency.exponentialRampToValueAtTime(800,t+0.03);
+  gain.gain.setValueAtTime(0.04,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.04);
+  osc.start(t);osc.stop(t+0.04);
+}
+function playScoreBlip(avgDmg){
+  let ac=ensureAudio(),t=ac.currentTime;
+  let osc=ac.createOscillator(),gain=ac.createGain();
+  osc.connect(gain);gain.connect(ac.destination);
+  // Score 0 = 880Hz (high), score 100+ = 440Hz (low), linear in between
+  let clamped=Math.max(0,Math.min(100,avgDmg));
+  let freq=880-clamped*4.4; // 880 → 440
+  // Perfect tile (rounds to 0): +25% pitch boost
+  if(Math.round(avgDmg)===0)freq=880*1.25;
+  osc.type='sine';osc.frequency.setValueAtTime(freq,t);
+  gain.gain.setValueAtTime(0.08,t);gain.gain.exponentialRampToValueAtTime(0.001,t+0.08);
+  osc.start(t);osc.stop(t+0.08);
+}
+
+const canvas=document.getElementById('grid');
+const ctx=canvas.getContext('2d');
+let TILE_SIZE=20;
+
+function resizeCanvas(){
+  TILE_SIZE=Math.min(Math.floor((window.innerHeight-70)/ARENA_H),Math.floor((window.innerWidth-720)/ARENA_W),24);
+  TILE_SIZE=Math.max(TILE_SIZE,14);
+  canvas.width=ARENA_W*TILE_SIZE; canvas.height=ARENA_H*TILE_SIZE; render();
+}
+window.addEventListener('resize',resizeCanvas);
+
+
+// ===== PHASE 1: SIM ENGINE =====
+function createMob(type,x,y,id){let d=MOB_DEFS[type];return{id:id||mobIdCounter++,type,letter:d.letter,x,y,size:d.size,hp:d.hp,maxHp:d.hp,atkSpeed:d.atkSpeed,range:d.range,style:d.style,color:d.color,attackDelay:0,stunned:0,frozen:0,dead:false,dying:-1,dyingStartTick:-1,corpseRemovalTick:undefined,revivedOnce:false,hasLOS:false,hadLOS:false,isBlob:d.isBlob||false,blobScanPrayer:null,hasDig:d.hasDig||false,digTimer:0,digLocation:null,hasFlicker:d.hasFlicker||false,flickering:false,incomingProjectiles:[],noLOSTicks:0}}
+function createPlayer(x,y){return{x,y,size:1,hp:99,maxHp:99,aggro:null,attackDelay:0,range:currentLoadout.range,atkSpeed:currentLoadout.atkSpeed,incomingProjectiles:[],autoRetaliate:true,lastHit:true,recoilQueue:[],echoBootsCooldown:0,lastBarrageTarget:null,lastAttacker:null}}
+
+function initSim(spawnCode,playerPos){
+  mobIdCounter=0;tickEvents=[];tickHits={};gridMobColumns=[];
+  let region=createRegion(pillars),mobs=[],player=createPlayer(playerPos.x,playerPos.y),deadMobs=[];
+  let parsed=parseSpawnCode(spawnCode);
+  if(parsed.error){setStatus(parsed.error,'error');return null}
+  for(let spawn of parsed.spawns){if(spawn.type==='nothing')continue;let mob=createMob(spawn.type,spawn.x,spawn.y,mobIdCounter++);mob.aggroTarget='player';mob.infNum=spawn.infNum||0;mobs.push(mob)}
+  // Sort by game index: higher infNum = lower game index = processed first
+  if(parsed.hasIndexInfo)mobs.sort((a,b)=>b.infNum-a.infNum);
+  // Spawn 3 nibblers randomly if all pillars are dead
+  let allPillarsDead=!pillars.S&&!pillars.W&&!pillars.N;
+  if(allPillarsDead){spawnNibblers(mobs,region,(t,x,y,id)=>createMob(t,x,y,id),()=>mobIdCounter++)}
+  for(let m of mobs)gridMobColumns.push({id:m.id,letter:m.letter,color:m.color,type:m.type});
+  sortMobColumns();
+  return{region,mobs,player,tick:0,deadMobs,delayedBlobletSpawns:[]};
+}
+
+function markMobForProjectileRemoval(mob,tick){
+  if(mob.dead)return;
+  mob.hp=0;
+  if(mob.pendingRemovalTick===undefined||mob.pendingRemovalTick>tick+1){
+    mob.pendingRemovalTick=tick+1;
+    mob.dyingStartTick=tick;
+  }
+}
+function processCorpseExpiry(simRef,tick){
+  for(let mob of simRef.mobs){
+    if(mob.dead||mob.dying<=0)continue;
+    let remain=(mob.corpseRemovalTick??tick)-tick;
+    if(remain<=0){mob.dead=true;mob.dying=0;mob.corpseRemovalTick=undefined;mob.pendingRemovalTick=undefined;}
+    else mob.dying=remain;
+  }
+}
+function processPendingMobDeaths(simRef,tick){
+  let player=simRef.player;
+  for(let mob of simRef.mobs){
+    if(mob.dead||mob.dying>0)continue;
+    if(mob.pendingRemovalTick!==undefined&&mob.pendingRemovalTick<=tick){
+      mob.pendingRemovalTick=undefined;
+      mob.dying=DEATH_ANIM_TICKS;
+      mob.corpseRemovalTick=tick+DEATH_ANIM_TICKS;
+      onMobDeath(mob,player,simRef.region,simRef.mobs,tick,simRef);
+    }
+  }
+}
+
+function simulateTick(){
+  if(!sim)return;sim.tick++;
+  let t=sim.tick,region=sim.region,mobs=sim.mobs,player=sim.player;
+  processCorpseExpiry(sim,t);
+  processPendingMobDeaths(sim,t);
+  processDelayedBlobletSpawns(sim,t);
+  // Process recoil queue (ring of suffering + echo boots)
+  if(player.recoilQueue.length>0){
+    let rem=[];
+    for(let r of player.recoilQueue){
+      if(r.tick<=t){
+        let mob=mobs.find(m=>m.id===r.mobId&&!m.dead&&m.dying<=0&&m.pendingRemovalTick===undefined);
+        if(mob&&mob.dying===-1&&mob.pendingRemovalTick===undefined){mob.hp-=r.damage;if(mob.hp<=0){markMobForProjectileRemoval(mob,t)}
+          tickEvents.push({tick:t,type:mob.type,detail:`${r.source==='ring'?'Ring of Suffering':'Echo Boots'} recoil ${r.damage} → ${mob.type} #${mob.id}`,mobId:mob.id,isHit:true})}
+      }else{rem.push(r)}
+    }
+    player.recoilQueue=rem;
+  }
+  for(let mob of mobs){if(mob.dead||mob.dying>0)continue;if(mob.stunned>0){mob.stunned--;continue}if(mob.frozen>0){mob.frozen--;continue}moveMob(mob,player,region,mobs,sim)}
+  for(let mob of mobs){if(mob.dead||mob.dying>0||mob.stunned>0)continue;mob.attackDelay--;mobAttackStep(mob,player,region,mobs,t,sim)}
+  // Player projectiles land after NPC actions for this tick. A fatal hit marks the
+  // target for removal on the next tick, but it does not prevent this tick's attack.
+  for(let mob of mobs){if(!mob.dead&&mob.dying<=0)processIncomingProjectiles(mob,t)}
+  processPlayerProjectiles(player,t);
+  player.attackDelay--;movePlayer(player,region,mobs);playerAttackStep(player,mobs,region,t);
+  if(!autozukRunning)updateUI();
+}
+function processIncomingProjectiles(mob,tick){let rem=[];for(let p of mob.incomingProjectiles){p.delay--;if(p.delay<=0){if(mob.pendingRemovalTick===undefined){mob.hp-=p.damage;if(mob.hp<=0){markMobForProjectileRemoval(mob,tick)}}}else rem.push(p)}mob.incomingProjectiles=rem}
+function processPlayerProjectiles(player,tick){
+  let rem=[],arrived=[];
+  for(let p of player.incomingProjectiles){p.delay--;
+    if(p.delay<=0){tickEvents.push({tick,type:p.mobType,detail:`${p.style} hit from ${p.mobType} (id:${p.mobId})`,mobId:p.mobId,isHit:true});
+      arrived.push(p);
+      // Apply actual damage using loadout + prayer
+      let loadout=currentLoadout;
+      let praySeq=activePrayerSeq;
+      if(!praySeq&&playerPlacement){let pk=`${playerPlacement.x},${playerPlacement.y}`;if(autozukResults[pk])praySeq=autozukResults[pk].prayer}
+      let blocked=false;
+      if(praySeq){let prayTick=p.fireTick!==undefined?p.fireTick:tick;let pray=praySeq[prayTick%4];
+        if(p.style==='magic'&&pray==='mage')blocked=true;
+        if(p.style==='range'&&pray==='range')blocked=true;
+        if(p.style==='melee'&&pray==='melee')blocked=true;}
+      if(!blocked){
+        let atkStats=resolveMonsterAttackStats(loadout,p.mobType,p.style);
+        if(atkStats){let acc=atkStats.acc,maxH=atkStats.max;
+          if(Math.random()<acc){let dmg=Math.floor(Math.random()*(maxH+1));
+            if(dmg>0){
+              player.hp-=dmg;
+              // Recoil damage (Blood Barrage loadout only)
+              if(loadout.hasRecoil){
+                let attackerMob=sim.mobs.find(m=>m.id===p.mobId&&!m.dead&&m.dying<=0&&m.pendingRemovalTick===undefined);
+                if(attackerMob){
+                  // Ring of Suffering: floor(dmg*0.1+1) damage, 1 tick after hit
+                  let ringDmg=Math.floor(dmg*0.1+1);
+                  player.recoilQueue.push({tick:tick+1,mobId:p.mobId,damage:ringDmg,source:'ring'});
+                  // Echo Boots: 1 damage if attacker within 1 tile, 1 tick after hit, 4-tick cycle
+                  let mobDist=distToMob(player.x,player.y,attackerMob);
+                  if(mobDist<=1&&tick>=player.echoBootsCooldown){
+                    player.recoilQueue.push({tick:tick+1,mobId:p.mobId,damage:1,source:'echo'});
+                    player.echoBootsCooldown=tick+4;
+                  }
+                }
+              }
+            } else {
+              player.hp-=dmg; // dmg is 0, no recoil
+            }
+          }
+        }
+      }
+    }else rem.push(p)}
+  // Auto-retaliate: target lastAttacker (set when mob fires, not when projectile lands)
+  if(player.autoRetaliate&&arrived.length>0){
+    if(!player.aggro||player.aggro.dead||(player.aggro.dying>0&&tick>player.aggro.dyingStartTick)){
+      let target=player.lastAttacker;
+      if(target&&!target.dead&&target.dying===-1&&target.pendingRemovalTick===undefined){
+        player.aggro=target;
+        let fd=Math.floor(currentLoadout.atkSpeed/2)+1;if(player.attackDelay<fd)player.attackDelay=fd;
+      }
+    }
+  }
+  player.incomingProjectiles=rem;
+}
+function recordTickHit(tick,mobId,mobType,style,isScan){
+  if(!tickHits[tick])tickHits[tick]=[];let d=MOB_DEFS[mobType];
+  tickHits[tick].push({mobId,mobType,color:d?d.color:'#888',letter:d?d.letter:'?',style,isScan});
+  if(!gridMobColumns.find(c=>c.id===mobId)){gridMobColumns.push({id:mobId,letter:d?d.letter:'?',color:d?d.color:'#888',type:mobType});sortMobColumns();rebuildTickGridHeader()}
+}
+const MOB_TYPE_PRIORITY={mager:0,ranger:1,meleer:2,blob:3,bat:4,nibbler:5,blobletMage:6,blobletRange:7,blobletMelee:8};
+function sortMobColumns(){gridMobColumns.sort((a,b)=>{let pa=MOB_TYPE_PRIORITY[a.type]??99,pb=MOB_TYPE_PRIORITY[b.type]??99;return pa!==pb?pa-pb:a.id-b.id})}
+
+function moveMob(mob,player,region,mobs,simRef){
+  if(mob.hasDig&&mob.digTimer>0){mob.digTimer--;if(mob.digTimer===0){mob.x=mob.digLocation.x;mob.y=mob.digLocation.y;mob.attackDelay=6;mob.frozen=2;mob.digLocation=null;if(player.aggro===mob)player.aggro=null}return}
+  mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
+  if(mob.hasLOS){mob.noLOSTicks=0}else{mob.noLOSTicks=(mob.noLOSTicks||0)+1}
+  if(mob.hasLOS||mob.frozen>0)return;
+  if(mob.hasDig&&!mob.hasLOS&&!mob.digTimer){if((mob.attackDelay<=-38&&Math.random()<0.1)||mob.attackDelay<=-50){startDig(mob,player,region);return}}
+  let dx=mob.x+Math.sign(player.x-mob.x),dy=mob.y+Math.sign(player.y-mob.y);
+  if(collisionMath(mob.x,mob.y,mob.size,player.x,player.y,1)){if(Math.random()<0.5){dy=mob.y;dx=mob.x+(Math.random()<0.5?1:-1)}else{dx=mob.x;dy=mob.y+(Math.random()<0.5?1:-1)}}
+  else if(collisionMath(dx,dy,mob.size,player.x,player.y,1)){dy=mob.y}
+  if(mob.attackDelay>mob.atkSpeed)return;
+  let xOff=dx-mob.x,yOff=mob.y-dy;
+  // Diagonal: OSRS-style NPC movement only checks whether the destination footprint is clear.
+  // Do NOT require the intermediate horizontal/vertical components to be clear,
+  // or large NPCs will start their diagonal around pillars one tick too late.
+  let both=canMoveTiles(mob,xOff,yOff,null,region,mobs);
+  let canMoveX=false,canMoveY=false;
+  if(!both){if(xOff!==0)canMoveX=canMoveTiles(mob,xOff,0,null,region,mobs);if(!canMoveX&&yOff!==0)canMoveY=canMoveTiles(mob,0,yOff,null,region,mobs)}
+  if(both){mob.x=dx;mob.y=dy}else if(canMoveX){mob.x=dx}else if(canMoveY){mob.y=dy}
+}
+function canMoveTiles(mob,xOff,yOff,axis_unused,region,mobs){
+  if(xOff===0&&yOff===0)return true;
+  let s=mob.size,dx=xOff,dy=-yOff; // dy: yOff=-1→south(+1), yOff=1→north(-1)
+  let nx=mob.x+dx,ny=mob.y+dy,bl=region.blocked,isNib=mob.type==='nibbler';
+  // Check new column tiles (if moving in x)
+  if(dx===-1)for(let i=0;i<s;i++){if(bl[(nx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(nx,ny-i,1,mobs,mob,true))return false}
+  else if(dx===1){let rx=nx+s-1;for(let i=0;i<s;i++){if(bl[(rx<<6)|(ny-i)])return false;if(!isNib&&collidesWithMobs(rx,ny-i,1,mobs,mob,true))return false}}
+  // Check new row tiles (if moving in y)
+  if(dy===1)for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|ny])return false;if(!isNib&&collidesWithMobs(nx+i,ny,1,mobs,mob,true))return false}
+  else if(dy===-1){let by=ny-s+1;for(let i=0;i<s;i++){if(bl[((nx+i)<<6)|by])return false;if(!isNib&&collidesWithMobs(nx+i,by,1,mobs,mob,true))return false}}
+  return true;
+}
+function mobAttackStep(mob,player,region,mobs,tick,simRef){
+  if(mob.dead||mob.dying>0||mob.stunned>0)return;
+  mob.hadLOS=mob.hasLOS;mob.hasLOS=mobHasLOS(region,mob,player);
+  if(mob.hasFlicker){mob.flickering=(mob.attackDelay===1&&mob.hasLOS);if(!mob.hasLOS||mob.attackDelay>0||isUnderMob(mob,player))return;
+    if(Math.random()<0.1&&simRef.deadMobs.length>0){let toRes=simRef.deadMobs.shift();toRes.revivedOnce=true;toRes.hp=Math.floor(toRes.maxHp/2);toRes.dead=false;toRes.dying=-1;toRes.pendingRemovalTick=undefined;toRes.corpseRemovalTick=undefined;toRes.attackDelay=toRes.atkSpeed+1;toRes.stunned=0;toRes.frozen=0;
+      let loc=findRespawnLocation(toRes.size,region,mobs);toRes.x=loc.x;toRes.y=loc.y;toRes.aggroTarget='player';if(!mobs.includes(toRes))mobs.push(toRes);
+      if(!gridMobColumns.find(c=>c.id===toRes.id)){gridMobColumns.push({id:toRes.id,letter:toRes.letter,color:toRes.color,type:toRes.type});sortMobColumns();rebuildTickGridHeader()}
+      mob.attackDelay=mob.atkSpeed*2;tickEvents.push({tick,type:'mager',detail:`Mager resurrected ${toRes.type}!`,mobId:mob.id,isResurrect:true});return}
+    fireAttack(mob,player,region,tick);mob.attackDelay=mob.atkSpeed;return}
+  if(mob.isBlob){if(!mob.hasLOS&&!mob.blobScanPrayer)return;
+    if(mob.hasLOS&&(!mob.hadLOS||(!mob.blobScanPrayer&&mob.attackDelay<=0))){mob.blobScanPrayer='scanned';mob.attackDelay=mob.atkSpeed;
+      // Blob scans prayer: opposite of what's prayed, or random if no sequence
+      let style;
+      let praySeq=activePrayerSeq;
+      if(!praySeq&&playerPlacement){let pk=`${playerPlacement.x},${playerPlacement.y}`;if(autozukResults[pk])praySeq=autozukResults[pk].prayer}
+      if(praySeq){let pray=praySeq[tick%4];
+        if(pray==='mage')style='range';else if(pray==='range')style='magic';else style=Math.random()<0.5?'magic':'range';
+      }else{style=Math.random()<0.5?'magic':'range'}
+      mob.currentStyle=style;
+      tickEvents.push({tick,type:'blob',detail:`Blob SCAN (id:${mob.id}) → ${style}`,mobId:mob.id,isScan:true});recordTickHit(tick,mob.id,mob.type,style,true);return}
+    if(mob.blobScanPrayer&&mob.attackDelay<=0){fireAttack(mob,player,region,tick);mob.blobScanPrayer=null;mob.attackDelay=mob.atkSpeed}return}
+  if(!mob.hasLOS||mob.attackDelay>0)return;if(isUnderMob(mob,player))return;
+  let actualStyle=mob.style;
+  fireAttack(mob,player,region,tick,actualStyle);mob.attackDelay=mob.atkSpeed;
+}
+function fireAttack(mob,player,region,tick,overrideStyle){
+  let style=overrideStyle||mob.currentStyle||mob.style;if(style==='blob')style=mob.currentStyle||'magic';
+  if(canUseSecondaryMelee(mob,player)&&Math.random()<0.5)style='melee';
+  let delay=monsterProjectileDelay(mob,style,player);
+  player.incomingProjectiles.push({delay:delay+1,damage:0,mobType:mob.type,mobId:mob.id,style,fireTick:tick});
+  // last_attacker is set when mob fires, not when projectile lands
+  setPlayerLastAttacker(player,mob);
+  recordTickHit(tick,mob.id,mob.type,style,false);
+  tickEvents.push({tick,type:mob.type,detail:`${mob.type} attacks (${style}), pray T${tick}`,mobId:mob.id,isAttack:true,hitTick:tick+delay});
+}
+function movePlayer(player,region,mobs){
+  if(!player.aggro||player.aggro.dead||player.aggro.dying>0||player.aggro.pendingRemovalTick!==undefined)return;
+  let target=player.aggro;
+  // Already in range with LOS? Don't move
+  if(distToMob(player.x,player.y,target)<=player.range&&playerHasLOS(region,player.x,player.y,target,player.range))return;
+  // Destination: closest face tile (melee-adjacent, N/S priority on ties)
+  let dest=getClosestFaceTile(target,player.x,player.y,region);
+  if(!dest)return;
+  // Running: take 2 walk steps per tick
+  let step1=osrsWalkStep(player.x,player.y,dest.x,dest.y,region);
+  if(!step1)return;
+  player.x=step1.x;player.y=step1.y;
+  if(player.x===dest.x&&player.y===dest.y)return;
+  let step2=osrsWalkStep(player.x,player.y,dest.x,dest.y,region);
+  if(step2){player.x=step2.x;player.y=step2.y}
+}
+function playerAttackStep(player,mobs,region,tick){
+  if(player.aggro&&(player.aggro.dead||(player.aggro.dying>0&&tick>player.aggro.dyingStartTick)))player.aggro=null;
+  if(!player.aggro||player.attackDelay>0||player.aggro.pendingRemovalTick!==undefined)return;
+  let loadout=currentLoadout;
+  if(!playerHasLOS(region,player.x,player.y,player.aggro,loadout.range))return;
+  let target=player.aggro;
+  let delay=playerProjectileDelay(loadout,player.x,player.y,target);
+  // Roll accuracy + damage using loadout
+  let accArr=loadout.playerAcc[target.type];
+  let acc=player.lastHit?accArr[0]:accArr[1];
+  let hit=Math.random()<acc;
+  let dmg=0;
+  if(hit){dmg=Math.floor(Math.random()*(loadout.maxHit+1));player.lastHit=true}else{player.lastHit=false}
+  target.incomingProjectiles.push({delay,damage:dmg});
+  // Blood barrage: heal 25% at cast time + 3x3 AOE
+  if(loadout.isBloodBarrage){
+    if(dmg>0&&player.hp<player.maxHp){player.hp=Math.min(player.maxHp,player.hp+Math.floor(dmg*0.25))}
+    let aoeOffsets=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+    let hitCount=1;
+    for(let off of aoeOffsets){
+      if(hitCount>=9)break;
+      let ax=target.x+off[0],ay=target.y+off[1];
+      for(let m of mobs){
+        if(m.dead||m.dying>0||m===target)continue;
+        if(m.x===ax&&m.y===ay){
+          hitCount++;
+          let sAccArr=loadout.playerAcc[m.type];
+          let sAcc=player.lastHit?sAccArr[0]:sAccArr[1];
+          let sHit=Math.random()<sAcc;
+          let sDmg=sHit?Math.floor(Math.random()*(loadout.maxHit+1)):0;
+          let sDelay=playerProjectileDelay(loadout,player.x,player.y,m);
+          m.incomingProjectiles.push({delay:sDelay,damage:sDmg});
+          if(sDmg>0&&player.hp<player.maxHp){player.hp=Math.min(player.maxHp,player.hp+Math.floor(sDmg*0.25))}
+          break;
+        }
+      }
+    }
+  }
+  player.attackDelay=loadout.atkSpeed;
+  // Track barrage splash visual (Phase 1 rendering only)
+  if(loadout.isBloodBarrage&&dmg>0){player.lastBarrageTarget={x:target.x,y:target.y,tick};}
+  tickEvents.push({tick,type:'player-atk',detail:`Player → ${target.type} #${target.id}, ${dmg}dmg hits T${tick+delay}`,mobId:target.id,isPlayerAttack:true});
+}
+function spawnBlobletsFromBlob(blob,tick,simRef){
+  let mobs=simRef.mobs;
+  let bm=createMob('blobletMage',blob.x+2,blob.y-2,mobIdCounter++);bm.aggroTarget='player';bm.stunned=0;bm.frozen=1;bm.attackDelay=4;bm.parentBlobId=blob.id;mobs.push(bm);
+  let br=createMob('blobletRange',blob.x+1,blob.y-1,mobIdCounter++);br.aggroTarget='player';br.stunned=0;br.frozen=1;br.attackDelay=4;br.parentBlobId=blob.id;mobs.push(br);
+  let bx=createMob('blobletMelee',blob.x,blob.y,mobIdCounter++);bx.aggroTarget='player';bx.stunned=0;bx.frozen=1;bx.attackDelay=4;bx.parentBlobId=blob.id;mobs.push(bx);
+  for(let bl of[bm,br,bx])gridMobColumns.push({id:bl.id,letter:bl.letter,color:bl.color,type:bl.type});
+  sortMobColumns();rebuildTickGridHeader();
+  tickEvents.push({tick,type:'blob',detail:`Bloblets spawn (frozen this tick)`,mobId:blob.id});
+}
+function processDelayedBlobletSpawns(simRef,tick){
+  let pending=simRef.delayedBlobletSpawns||[];
+  if(pending.length===0)return;
+  let keep=[];
+  for(let item of pending){
+    if(item.tick<=tick)spawnBlobletsFromBlob(item.blob,tick,simRef);
+    else keep.push(item);
+  }
+  simRef.delayedBlobletSpawns=keep;
+}
+function onMobDeath(mob,player,region,mobs,tick,simRef){
+  if(mob.isBlob){
+    if(!simRef.delayedBlobletSpawns)simRef.delayedBlobletSpawns=[];
+    simRef.delayedBlobletSpawns.push({tick:tick+1,blob:mob});
+    tickEvents.push({tick,type:'blob',detail:`Blob died → bloblets spawn T${tick+1}`,mobId:mob.id});
+  }
+  if(!mob.type.startsWith('bloblet')&&mob.type!=='nibbler'&&!mob.revivedOnce)simRef.deadMobs.push(mob);
+  if(player.aggro===mob)player.aggro=null;
+  if(player.lastAttacker===mob)player.lastAttacker=null;
+}
+
 
 // =====================================================
 // PHASE 2: HEATMAP COLOR
@@ -1756,10 +1876,76 @@ document.getElementById('spawnCode').addEventListener('input',function(){
 });
 
 // =====================================================
+// WORKER POOL
+// =====================================================
+function buildWorkerBlobUrl(){
+  let simCore = document.getElementById('sim-core').textContent;
+  let workerSrc = document.getElementById('autozuk-worker').textContent;
+  let blob = new Blob([simCore + ';\n' + workerSrc], {type:'application/javascript'});
+  return URL.createObjectURL(blob);
+}
+class WorkerPool {
+  constructor(size, pillarConfig, loadout){
+    this.size = Math.max(1, Math.min(size, 8));
+    this.workers = [];
+    this.idle = [];
+    this.queue = [];
+    this.blobUrl = buildWorkerBlobUrl();
+    for(let i=0;i<this.size;i++){
+      let w = new Worker(this.blobUrl);
+      w._pending = null;
+      w.onmessage = (e)=>this._onMessage(w, e.data);
+      w.onerror = (e)=>{
+        console.error('[worker error]', e.message || e);
+        if(w._pending){ let p = w._pending; w._pending = null; p.reject(e); this._release(w); }
+      };
+      this.workers.push(w);
+    }
+    this.initPromise = Promise.all(this.workers.map(w=>this._send(w, {type:'init', pillarConfig, loadout})));
+  }
+  _send(worker, msg){
+    return new Promise((resolve, reject)=>{
+      worker._pending = {resolve, reject};
+      worker.postMessage(msg);
+    });
+  }
+  _onMessage(worker, data){
+    let p = worker._pending; worker._pending = null;
+    if(p) p.resolve(data);
+    this._release(worker);
+  }
+  _release(worker){
+    if(this.queue.length > 0){
+      let job = this.queue.shift();
+      this._send(worker, job.msg).then(job.resolve, job.reject);
+    } else {
+      this.idle.push(worker);
+    }
+  }
+  async ready(){ await this.initPromise; }
+  dispatch(msg){
+    return new Promise((resolve, reject)=>{
+      if(this.idle.length > 0){
+        let w = this.idle.pop();
+        this._send(w, msg).then(resolve, reject);
+      } else {
+        this.queue.push({msg, resolve, reject});
+      }
+    });
+  }
+  terminate(){
+    for(let w of this.workers) w.terminate();
+    URL.revokeObjectURL(this.blobUrl);
+    this.workers = []; this.idle = []; this.queue = [];
+  }
+}
+
+// =====================================================
 // PHASE 2: BATCH RUNNER
 // =====================================================
 async function startAutozuk(){
   if(autozukRunning)return;
+  if(window._autozukPool){ window._autozukPool.terminate(); window._autozukPool=null; }
   let code=document.getElementById('spawnCode').value;
   if(!code.trim()){setStatus('Enter a spawn code first','error');return}
   let parsed=parseSpawnCode(code);if(parsed.error){setStatus(parsed.error,'error');return}
@@ -1798,127 +1984,75 @@ async function startAutozuk(){
   for(let spawn of parsed.spawns){if(spawn.type==='nothing')continue;testMobs.push({x:spawn.x,y:spawn.y,size:MOB_DEFS[spawn.type].size,type:spawn.type,range:MOB_DEFS[spawn.type].range,dead:false})}
   let testRegion=createRegion(pillars);
 
-  // STEP 1: Exclusion sweep
+  // STEP 1: Exclusion sweep (parallel, in workers)
   document.getElementById('autozukStatus').textContent='Phase 1: Excluding tiles...';
   let allTiles=[];
   for(let y=ARENA_Y_MIN;y<=ARENA_Y_MAX;y++)for(let x=ARENA_X_MIN;x<=ARENA_X_MAX;x++)allTiles.push({x,y});
 
+  let poolSize = Math.max(1, Math.min((navigator.hardwareConcurrency||4) - 1, 8));
+  window._autozukPool = new WorkerPool(poolSize, pillars, loadout);
+  await window._autozukPool.ready();
+
   let eligibleTiles=[];
-  let exIdx=0;
-  await new Promise(resolve=>{
-    function sweepBatch(){
-      let count=0;
-      while(exIdx<allTiles.length&&count<20){// ~200 tiles/sec at 20 per 100ms frame
-        let t=allTiles[exIdx];
-        if(checkTileExcluded(t.x,t.y,testMobs,testRegion)){excludedTiles.add(`${t.x},${t.y}`);playExclusionBlip()}
-        else{eligibleTiles.push(t)}
-        exIdx++;count++;
-      }
-      let pct=Math.floor(exIdx/allTiles.length*100);
-      document.getElementById('progressFill').style.width=pct*0.2+'%'; // 0-20% for exclusion
-      document.getElementById('autozukStatus').textContent=`Excluding: ${exIdx}/${allTiles.length} tiles checked, ${eligibleTiles.length} eligible`;
-      render();
-      if(exIdx<allTiles.length)setTimeout(sweepBatch,100);else resolve();
-    }
-    sweepBatch();
-  });
+  let chunkSize = Math.max(20, Math.ceil(allTiles.length / (poolSize*2)));
+  let chunks = [];
+  for(let i=0;i<allTiles.length;i+=chunkSize) chunks.push(allTiles.slice(i, i+chunkSize));
+  let excludeCompleted = 0;
+  let excludeResults = await Promise.all(chunks.map(chunk=>{
+    return window._autozukPool.dispatch({type:'exclude', tiles:chunk, spawnCode:code}).then(res=>{
+      excludeCompleted += chunk.length;
+      let pct = Math.floor(excludeCompleted/allTiles.length*100);
+      document.getElementById('progressFill').style.width = (pct*0.2) + '%';
+      document.getElementById('autozukStatus').textContent = `Excluding: ${excludeCompleted}/${allTiles.length} tiles checked`;
+      return res;
+    });
+  }));
+  for(let res of excludeResults){
+    for(let t of res.excluded){ excludedTiles.add(`${t.x},${t.y}`); playExclusionBlip(); }
+    for(let t of res.eligible) eligibleTiles.push(t);
+  }
+  render();
 
   setStatus(`${eligibleTiles.length} tiles to simulate, ${excludedTiles.size} excluded`,'info');
 
-  // STEP 2: Simulate each eligible tile
+  // STEP 2: Simulate each eligible tile (parallel, in workers)
   let totalTiles=eligibleTiles.length,completedTiles=0;
-  let cachedRegion=createRegion(pillars); // Create once, reuse across all sims
-  for(let ti=0;ti<totalTiles;ti++){
-    let tile=eligibleTiles[ti];
-    let key=`${tile.x},${tile.y}`;
-    let tilePos={x:tile.x,y:tile.y};
-    document.getElementById('autozukStatus').textContent=`Simulating tile ${ti+1}/${totalTiles} (${tile.x},${tile.y})...`;
+  document.getElementById('autozukStatus').textContent=`Simulating ${totalTiles} tiles across ${poolSize} workers...`;
+  let seedBase=(Date.now()&0xffffffff)>>>0;
 
-    // Run animated visual preview (30 ticks, ~10 frames)
-    sim=initSim(code,tilePos);
-    if(sim){
-      await new Promise(resolve=>{
-        let vt=0;
-        function animFrame(){
-          if(!sim||vt>=30){sim=null;tickEvents=[];tickHits={};gridMobColumns=[];resolve();return}
-          for(let i=0;i<6&&vt<30;i++){simulateTick();vt++;if(sim&&sim.mobs.every(m=>m.dead)){vt=30;break}}
-          render();
-          requestAnimationFrame(animFrame);
-        }
-        requestAnimationFrame(animFrame);
-      });
-    }
+  await Promise.all(eligibleTiles.map(tile=>{
+    return window._autozukPool.dispatch({
+      type:'simulate', tile, spawnCode:code, loadout, maxTicks, maxSims, seedBase
+    }).then(res=>{
+      completedTiles++;
+      let pct=20+Math.floor(completedTiles/totalTiles*80);
+      document.getElementById('progressFill').style.width=pct+'%';
+      document.getElementById('autozukStatus').textContent=`Simulated ${completedTiles}/${totalTiles} tiles`;
+      if(res.summary){
+        let key=`${tile.x},${tile.y}`;
+        autozukResults[key]=res.summary;
+        playScoreBlip(res.summary.avgDamage);
+        updateLiveDetail(tile.x,tile.y,res.summary);
+        liveFeedEntries++;
+        let prayLabels={mage:'M',range:'R',melee:'X'};
+        let dmgRound=Math.round(res.summary.avgDamage);
+        let dmgColor=heatmapColor(res.summary.avgDamage,1);
+        let prayHtml=[1,2,3,0].map(i=>res.summary.prayer[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
+        let barW=Math.min(100,res.summary.avgDamage);
+        let row=document.createElement('div');row.className='feed-row';
+        row.style.borderLeftColor=dmgColor;
+        let deathLabel=res.summary.markedDead?` \u2620${Math.round(res.summary.deathPct)}%`:'';
+        row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${res.summary.totalSims}</span>`;
+        let feedPanel=document.getElementById('liveFeedPanel');
+        feedPanel.appendChild(row);
+        feedPanel.scrollTop=feedPanel.scrollHeight;
+      }
+      render();
+    });
+  }));
 
-    // Run remaining sims headlessly
-    let allResults=[];
-    let earlyStop=false;
-    for(let s=0;s<maxSims;s++){
-      let result=hlRunSim(code,tilePos,pillars,loadout,maxTicks,cachedRegion);
-      if(result)allResults.push(result);
-      // Early death termination: if first 3 sims all result in death, skull this tile
-      if(s===2&&allResults.length>=3){
-        let quickPrayer=optimizePrayer(allResults,code,pillars,loadout);
-        let allDead=allResults.every(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).died);
-        if(allDead){earlyStop=true;break}
-      }
-      // Early termination: after 10 sims, if avg damage > 80, skip this tile
-      if(s===9&&allResults.length>=10){
-        let quickPrayer=optimizePrayer(allResults,code,pillars,loadout);
-        let quickDmgs=allResults.map(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).damage);
-        let quickAvg=quickDmgs.reduce((a,b)=>a+b,0)/quickDmgs.length;
-        if(quickAvg>80){earlyStop=true;break}
-      }
-    }
-
-    if(allResults.length>0){
-      // Optimize prayer
-      let prayer=optimizePrayer(allResults,code,pillars,loadout);
-      // Calculate per-sim stats with optimal prayer
-      let damages=[],completionTicks=[];
-      let invalidCount=0,deathCount=0;
-      for(let r of allResults){
-        if(r.status==='invalid'){invalidCount++;continue}
-        let res=calcSimDamage(r.attacks,prayer.sequence,loadout,r.mobInitHP);
-        if(res.died)deathCount++;
-        damages.push(res.damage);completionTicks.push(r.completedTick);
-      }
-      let deathPct=damages.length>0?(deathCount/damages.length*100):0;
-      let avgDmg=damages.length>0?damages.reduce((a,b)=>a+b,0)/damages.length:999;
-      let over50=damages.filter(d=>d>50).length;
-      let avgTicks=completionTicks.length>0?completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length:maxTicks;
-      let isMostlyDead=deathPct>30;
-      let invalidPct=allResults.length>0?(invalidCount/allResults.length*100):0;
-      let isMostlyInvalid=invalidPct>20;
-      autozukResults[key]={
-        avgDamage:avgDmg,damages,completionTicks,
-        over50Pct:damages.length>0?(over50/damages.length*100):100,
-        avgTicks,avgTime:(avgTicks*0.6).toFixed(1),
-        prayer:prayer.sequence,invalidPct:invalidPct,
-        totalSims:allResults.length,deathPct:deathPct,markedDead:isMostlyDead||isMostlyInvalid
-      };
-      playScoreBlip(avgDmg);
-      updateLiveDetail(tile.x,tile.y,autozukResults[key]);
-      liveFeedEntries++;
-      let prayLabels={mage:'M',range:'R',melee:'X'};
-      let dmgRound=Math.round(avgDmg);
-      let dmgColor=heatmapColor(avgDmg,1);
-      let prayHtml=[1,2,3,0].map(i=>prayer.sequence[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
-      let barW=Math.min(100,avgDmg);
-      let row=document.createElement('div');row.className='feed-row';
-      row.style.borderLeftColor=dmgColor;
-      let deathLabel=isMostlyDead?` \u2620${Math.round(deathPct)}%`:'';
-      row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${allResults.length}</span>`;
-      let feedPanel=document.getElementById('liveFeedPanel');
-      feedPanel.appendChild(row);
-      feedPanel.scrollTop=feedPanel.scrollHeight;
-    }
-    completedTiles++;
-    let pct=20+Math.floor(completedTiles/totalTiles*80);
-    document.getElementById('progressFill').style.width=pct+'%';
-    render();
-    // Yield to keep UI responsive
-    await new Promise(r=>{let ch=new MessageChannel();ch.port1.onmessage=()=>r();ch.port2.postMessage('')});
-  }
+  // Tear down the pool now that the batch is complete
+  if(window._autozukPool){ window._autozukPool.terminate(); window._autozukPool=null; }
 
   // Done
   autozukRunning=false;
@@ -2079,7 +2213,43 @@ function exportTilemarker(){
   });
 }
 
+// ===== DEV / EQUIVALENCE HARNESS =====
+function __fnv1a(str){
+  let h = 0x811c9dc5;
+  for(let i=0;i<str.length;i++){h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193);}
+  return (h >>> 0).toString(16).padStart(8,'0');
+}
+window.__autozukDevTest = function(){
+  const scenarios = [
+    {code:'MRYBXOOOO', tile:{x:15,y:15}, sims:20, seed:1},
+    {code:'MMRRX',     tile:{x:10,y:10}, sims:20, seed:2},
+    {code:'XXXBB',     tile:{x:20,y:20}, sims:20, seed:3},
+  ];
+  const pillarConfig = {S:true,W:true,N:true};
+  const loadout = LOADOUTS.blowpipe;
+  const region = createRegion(pillarConfig);
+  let parts = [];
+  for(let sc of scenarios){
+    let results = [];
+    for(let s=0;s<sc.sims;s++){
+      let r = hlRunSim(sc.code, sc.tile, pillarConfig, loadout, 400, region, sc.seed*1000 + s);
+      if(!r){parts.push('null'); continue;}
+      results.push({
+        t: r.completedTick,
+        st: r.status,
+        n: r.attacks.length,
+        a: r.attacks.map(a=>`${a.tick}|${a.mobId??''}|${a.style??''}|${a.isPlayerAttack?'P':''}|${a.hitTick??''}|${a.dmgRoll?Math.floor(a.dmgRoll*1000):''}|${a.accRoll?Math.floor(a.accRoll*1000):''}`).join(','),
+      });
+    }
+    parts.push(JSON.stringify(results));
+  }
+  let hash = __fnv1a(parts.join('|'));
+  console.log('[__autozukDevTest] hash =', hash);
+  return hash;
+};
+
 // ===== INIT =====
+window.addEventListener('beforeunload', ()=>{ if(window._autozukPool) window._autozukPool.terminate(); });
 resizeCanvas();updatePreview();render();
 </script>
 </body>
