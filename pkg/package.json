@@ -1,0 +1,11 @@
+{
+  "name": "autozuk-wasm",
+  "version": "0.1.0",
+  "files": [
+    "autozuk_wasm_bg.wasm",
+    "autozuk_wasm.js",
+    "autozuk_wasm.d.ts"
+  ],
+  "browser": "autozuk_wasm.js",
+  "types": "autozuk_wasm.d.ts"
+}

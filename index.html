@@ -1132,24 +1132,167 @@ function playerBFS(sx,sy,tx,ty,region){
 <script id="autozuk-worker" type="text/worker-source">
 // === AUTOZUK Worker ===
 // Messages in:
-//   {type:'init', pillarConfig, loadout}
+//   {type:'init', pillarConfig, loadout, wasm?}
 //   {type:'exclude', tiles:[{x,y}], spawnCode}
 //   {type:'simulate', tile:{x,y}, spawnCode, loadout, maxTicks, maxSims, seedBase}
 // Messages out:
-//   {type:'init-ok'}
+//   {type:'init-ok', engine}
 //   {type:'exclude-result', excluded:[{x,y}], eligible:[{x,y}]}
 //   {type:'simulate-result', tile, summary} where summary matches autozukResults[key]
-let W = { region: null, pillarConfig: null, loadout: null };
-self.onmessage = function(e){
+let W = { region: null, pillarConfig: null, loadout: null, loadoutRev: 0, useWasm: false, useWasmCached: false, simCacheKey: null, tileCoordBuffer: null };
+function getWasmBindgen(){
+  return typeof wasm_bindgen==='function' ? wasm_bindgen : null;
+}
+function tryWasmJson(fnName,payload){
+  let wasmApi=getWasmBindgen();
+  if(!W.useWasm||!wasmApi||typeof wasmApi[fnName]!=='function')return null;
+  try{
+    let out=JSON.parse(wasmApi[fnName](JSON.stringify(payload)));
+    if(out&&out.error)throw new Error(out.error);
+    return out;
+  }catch(err){
+    console.warn('[autozuk wasm fallback]', err&&err.message?err.message:err);
+    W.useWasm=false;
+    return null;
+  }
+}
+function getMessageLoadout(msg){
+  if(msg.loadout&&msg.loadout!==W.loadout){
+    W.loadout=msg.loadout;
+    W.loadoutRev++;
+    W.simCacheKey=null;
+  }
+  return W.loadout||msg.loadout;
+}
+function wasmQuickPrune(msg){
+  return msg.quickPrune===undefined ? true : !!msg.quickPrune;
+}
+function wasmPillarKey(){
+  let p=W.pillarConfig||{};
+  return `${p.S?1:0}${p.W?1:0}${p.N?1:0}`;
+}
+function ensureWasmSimContext(msg){
+  let wasmApi=getWasmBindgen();
+  if(!W.useWasmCached||!wasmApi||typeof wasmApi.configure_sim_context!=='function')return false;
+  let loadout=getMessageLoadout(msg);
+  if(!loadout)return false;
+  let key=`${msg.spawnCode}|${msg.maxTicks}|${msg.seedBase}|${W.loadoutRev}|${wasmPillarKey()}`;
+  if(W.simCacheKey===key)return true;
+  let out=tryWasmJson('configure_sim_context',{spawnCode:msg.spawnCode,pillarConfig:W.pillarConfig,loadout,maxTicks:msg.maxTicks,seedBase:msg.seedBase});
+  if(!out)return false;
+  W.simCacheKey=key;
+  return true;
+}
+function packTileCoords(tiles){
+  let len=tiles.length*2;
+  if(!W.tileCoordBuffer||W.tileCoordBuffer.length<len){
+    let nextLen=Math.max(64,len,W.tileCoordBuffer?W.tileCoordBuffer.length*2:0);
+    W.tileCoordBuffer=new Uint8Array(nextLen);
+  }
+  for(let i=0,j=0;i<tiles.length;i++){
+    W.tileCoordBuffer[j++]=tiles[i].x;
+    W.tileCoordBuffer[j++]=tiles[i].y;
+  }
+  return W.tileCoordBuffer.subarray(0,len);
+}
+function tryWasmCachedTiles(msg,tiles){
+  let wasmApi=getWasmBindgen();
+  if(!W.useWasmCached||!wasmApi||typeof wasmApi.simulate_tiles_cached!=='function')return null;
+  try{
+    if(!ensureWasmSimContext(msg))return null;
+    let packed=packTileCoords(tiles);
+    let out;
+    if(msg.topLimit>0&&typeof wasmApi.simulate_tiles_top_cached==='function'){
+      out=JSON.parse(wasmApi.simulate_tiles_top_cached(packed,msg.maxSims,wasmQuickPrune(msg),msg.topLimit));
+    }else{
+      out=JSON.parse(wasmApi.simulate_tiles_cached(packed,msg.maxSims,wasmQuickPrune(msg)));
+    }
+    if(out&&out.error)throw new Error(out.error);
+    return out;
+  }catch(err){
+    console.warn('[autozuk wasm cached fallback]', err&&err.message?err.message:err);
+    W.useWasmCached=false;
+    W.simCacheKey=null;
+    return null;
+  }
+}
+function runJsTileSimulation(msg,tile){
+  let loadout = getMessageLoadout(msg);
+  let maxTicks = msg.maxTicks;
+  let maxSims = msg.maxSims;
+  let seedBase = msg.seedBase;
+  let allResults = [];
+  for(let s=0;s<maxSims;s++){
+    let seed = (seedBase ^ (tile.x*73856093) ^ (tile.y*19349663) ^ (s*83492791)) >>> 0;
+    let result = hlRunSim(msg.spawnCode, tile, W.pillarConfig, loadout, maxTicks, W.region, seed);
+    if(result) allResults.push(result);
+    if(s===2 && allResults.length>=3){
+      let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+      let allDead = allResults.every(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).died);
+      if(allDead) break;
+    }
+    if(s===9 && allResults.length>=10){
+      let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+      let quickDmgs = allResults.map(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).damage);
+      let quickAvg = quickDmgs.reduce((a,b)=>a+b,0)/quickDmgs.length;
+      if(quickAvg>80) break;
+    }
+  }
+  if(allResults.length === 0)return null;
+  let prayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
+  let damages = [], completionTicks = [];
+  let invalidCount = 0, deathCount = 0;
+  for(let r of allResults){
+    if(r.status==='invalid'){invalidCount++; continue;}
+    let res = calcSimDamage(r.attacks, prayer.sequence, loadout, r.mobInitHP);
+    if(res.died) deathCount++;
+    damages.push(res.damage); completionTicks.push(r.completedTick);
+  }
+  let deathPct = damages.length>0 ? (deathCount/damages.length*100) : 0;
+  let avgDmg = damages.length>0 ? damages.reduce((a,b)=>a+b,0)/damages.length : 999;
+  let over50 = damages.filter(d=>d>50).length;
+  let avgTicks = completionTicks.length>0 ? completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length : maxTicks;
+  let isMostlyDead = deathPct > 30;
+  let invalidPct = allResults.length>0 ? (invalidCount/allResults.length*100) : 0;
+  let isMostlyInvalid = invalidPct > 20;
+  return {
+    avgDamage: avgDmg, damages, completionTicks,
+    over50Pct: damages.length>0 ? (over50/damages.length*100) : 100,
+    avgTicks, avgTime: (avgTicks*0.6).toFixed(1),
+    prayer: prayer.sequence, invalidPct,
+    totalSims: allResults.length, deathPct, markedDead: isMostlyDead || isMostlyInvalid
+  };
+}
+self.onmessage = async function(e){
   let msg = e.data;
   if(msg.type === 'init'){
     W.pillarConfig = msg.pillarConfig;
     W.loadout = msg.loadout;
     W.region = createRegion(msg.pillarConfig);
-    self.postMessage({type:'init-ok'});
+    W.useWasm=false;
+    if(msg.wasm&&msg.wasm.glueUrl&&msg.wasm.wasmUrl){
+      try{
+        importScripts(msg.wasm.glueUrl);
+        let wasmApi=getWasmBindgen();
+        if(wasmApi){
+          await wasmApi({module_or_path:msg.wasm.wasmUrl});
+          W.useWasm=typeof wasmApi.simulate_tile==='function'&&typeof wasmApi.simulate_tiles==='function'&&typeof wasmApi.exclude_tiles==='function';
+          W.useWasmCached=W.useWasm&&typeof wasmApi.configure_sim_context==='function'&&typeof wasmApi.simulate_tiles_cached==='function';
+        }
+      }catch(err){
+        console.warn('[autozuk wasm unavailable]', err&&err.message?err.message:err);
+        W.useWasm=false;
+      }
+    }
+    self.postMessage({type:'init-ok', engine: W.useWasm?'wasm':'js'});
     return;
   }
   if(msg.type === 'exclude'){
+    let wasmOut=tryWasmJson('exclude_tiles',{tiles:msg.tiles,spawnCode:msg.spawnCode,pillarConfig:W.pillarConfig});
+    if(wasmOut){
+      self.postMessage({type:'exclude-result', excluded:wasmOut.excluded||[], eligible:wasmOut.eligible||[], engine:'wasm'});
+      return;
+    }
     let parsed = parseSpawnCode(msg.spawnCode);
     let testMobs = [];
     if(!parsed.error){
@@ -1163,60 +1306,38 @@ self.onmessage = function(e){
       if(checkTileExcluded(t.x,t.y,testMobs,W.region)) excluded.push(t);
       else eligible.push(t);
     }
-    self.postMessage({type:'exclude-result', excluded, eligible});
+    self.postMessage({type:'exclude-result', excluded, eligible, engine:'js'});
     return;
   }
   if(msg.type === 'simulate'){
     let tile = msg.tile;
-    let loadout = msg.loadout;
-    let maxTicks = msg.maxTicks;
-    let maxSims = msg.maxSims;
-    let seedBase = msg.seedBase;
-    let allResults = [];
-    for(let s=0;s<maxSims;s++){
-      let seed = (seedBase ^ (tile.x*73856093) ^ (tile.y*19349663) ^ (s*83492791)) >>> 0;
-      let result = hlRunSim(msg.spawnCode, tile, W.pillarConfig, loadout, maxTicks, W.region, seed);
-      if(result) allResults.push(result);
-      if(s===2 && allResults.length>=3){
-        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-        let allDead = allResults.every(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).died);
-        if(allDead) break;
-      }
-      if(s===9 && allResults.length>=10){
-        let quickPrayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-        let quickDmgs = allResults.map(r=>calcSimDamage(r.attacks,quickPrayer.sequence,loadout,r.mobInitHP).damage);
-        let quickAvg = quickDmgs.reduce((a,b)=>a+b,0)/quickDmgs.length;
-        if(quickAvg>80) break;
-      }
-    }
-    if(allResults.length === 0){
-      self.postMessage({type:'simulate-result', tile, summary: null});
+    let cachedOut=tryWasmCachedTiles(msg,[tile]);
+    if(cachedOut){
+      let item=(cachedOut.results||[])[0]||{tile,summary:null};
+      self.postMessage({type:'simulate-result', tile:item.tile||tile, summary:item.summary||null, engine:'wasm'});
       return;
     }
-    let prayer = optimizePrayer(allResults, msg.spawnCode, W.pillarConfig, loadout);
-    let damages = [], completionTicks = [];
-    let invalidCount = 0, deathCount = 0;
-    for(let r of allResults){
-      if(r.status==='invalid'){invalidCount++; continue;}
-      let res = calcSimDamage(r.attacks, prayer.sequence, loadout, r.mobInitHP);
-      if(res.died) deathCount++;
-      damages.push(res.damage); completionTicks.push(r.completedTick);
+    let wasmOut=tryWasmJson('simulate_tile',{tile,spawnCode:msg.spawnCode,pillarConfig:W.pillarConfig,loadout:getMessageLoadout(msg),maxTicks:msg.maxTicks,maxSims:msg.maxSims,seedBase:msg.seedBase,quickPrune:msg.quickPrune});
+    if(wasmOut){
+      self.postMessage({type:'simulate-result', tile, summary:wasmOut.summary||null, engine:'wasm'});
+      return;
     }
-    let deathPct = damages.length>0 ? (deathCount/damages.length*100) : 0;
-    let avgDmg = damages.length>0 ? damages.reduce((a,b)=>a+b,0)/damages.length : 999;
-    let over50 = damages.filter(d=>d>50).length;
-    let avgTicks = completionTicks.length>0 ? completionTicks.reduce((a,b)=>a+b,0)/completionTicks.length : maxTicks;
-    let isMostlyDead = deathPct > 30;
-    let invalidPct = allResults.length>0 ? (invalidCount/allResults.length*100) : 0;
-    let isMostlyInvalid = invalidPct > 20;
-    let summary = {
-      avgDamage: avgDmg, damages, completionTicks,
-      over50Pct: damages.length>0 ? (over50/damages.length*100) : 100,
-      avgTicks, avgTime: (avgTicks*0.6).toFixed(1),
-      prayer: prayer.sequence, invalidPct,
-      totalSims: allResults.length, deathPct, markedDead: isMostlyDead || isMostlyInvalid
-    };
-    self.postMessage({type:'simulate-result', tile, summary});
+    self.postMessage({type:'simulate-result', tile, summary:runJsTileSimulation(msg,tile), engine:'js'});
+    return;
+  }
+  if(msg.type === 'simulate-batch'){
+    let cachedOut=tryWasmCachedTiles(msg,msg.tiles);
+    if(cachedOut){
+      self.postMessage({type:'simulate-batch-result', results:cachedOut.results||[], engine:'wasm'});
+      return;
+    }
+    let wasmOut=tryWasmJson('simulate_tiles',{tiles:msg.tiles,spawnCode:msg.spawnCode,pillarConfig:W.pillarConfig,loadout:getMessageLoadout(msg),maxTicks:msg.maxTicks,maxSims:msg.maxSims,seedBase:msg.seedBase,quickPrune:msg.quickPrune});
+    if(wasmOut){
+      self.postMessage({type:'simulate-batch-result', results:wasmOut.results||[], engine:'wasm'});
+      return;
+    }
+    let results = msg.tiles.map(tile=>({tile, summary:runJsTileSimulation(msg,tile)}));
+    self.postMessage({type:'simulate-batch-result', results, engine:'js'});
     return;
   }
 };
@@ -1626,6 +1747,12 @@ let selectedTile=null, excludedTiles=new Set();
 let activePrayerSeq=null; // 4-slot prayer sequence for tick grid display
 let solverPreviewState=null;
 let facingSouth=true;
+function tileKey(tile){return `${tile.x},${tile.y}`}
+function allArenaTiles(){
+  let tiles=[];
+  for(let y=ARENA_Y_MIN;y<=ARENA_Y_MAX;y++)for(let x=ARENA_X_MIN;x<=ARENA_X_MAX;x++)tiles.push({x,y});
+  return tiles;
+}
 const FLOOR_RAW='311d25,2f1c24,301b22,311c24,311c22,301a20,301a1f,311b20,301b20,301b20,301c21,301c21,301c23,301c23,301c23,301c23,2f1c23,2e1b22,301d23,301c22,321e24,2c171d,311b21,311b21,321c23,321c23,311c22,301c21,2f1c23|2e1b23,2e1b23,2e1b22,311c23,311c22,301b21,311b20,311c21,311b20,311c21,311c22,311d23,301d24,311d24,311d24,311d24,321f26,301c23,2d1a20,2d1a20,321d23,301c21,321d23,311c22,311c22,311c22,301c21,301c21,2f1c23|2d1b23,301d25,301e24,301c23,2f1c21,301c21,311d21,311d21,321e23,321e23,331e23,331f24,332025,332026,332026,332026,342229,332127,301e23,311e24,311d23,311e24,311c22,311c22,301c21,301c21,301c21,301c21,2f1c23|2c1b23,2e1d25,2f1e25,2e1c22,2d1b20,301c22,321f23,331e23,352125,352125,362226,372227,362327,372428,372428,362429,342328,332329,342429,352328,301e23,301d23,2c181e,301b21,301b21,301b21,301c21,301c21,301c23|2c1b23,2d1d24,2d1d24,2c1b21,2d1c21,311e24,342125,352226,362327,372426,382529,39262a,39272a,3a272b,39282b,38282b,3b2b2f,322327,332327,332327,36252a,37252a,321e24,342127,301c21,301c21,301c21,301c21,301c21|2f2027,2e1e26,2d1e25,2f1f25,302025,312124,332225,362326,382628,392728,3b2829,3c2a2b,3d2b2b,3d2b2c,3d2b2c,3c2c2d,36282a,1d1014,1a0c14,1c0d14,302024,332327,2e1c21,2f1c21,301d23,311d23,311c22,301c21,301c21|291b22,26181f,281a20,302126,342429,342327,342326,382628,3c2a2b,3d2c2b,3e2d2c,402f2e,41302e,41302e,41302e,3f312f,3e3232,1a0d14,160b14,180b14,38292c,3b2b2e,36262a,362329,321e24,311e24,301d23,2f1c21,2e1b21|1a0d14,170b14,1d1016,2b1d22,34262a,362629,382829,3c2c2c,3f2e2d,402f2d,42312e,433230,443430,443430,443430,433431,403432,170d14,170c14,180c14,3b2d2f,38292c,362529,342429,322025,321e24,301d23,2f1c21,2e1b21|180b14,160b14,1a0c14,302326,36272a,392a2c,372727,3e2e2e,40312e,42332f,443630,463731,483932,493b34,493a32,473a32,453a34,423834,413532,3e3330,3e302f,3b2c2d,38282b,362529,352328,332126,311e24,2f1c21,2e1b21|190b14,180b14,1c0f14,2e2125,362729,3b2c2d,3c2c2b,433330,443430,463730,493a32,4a3c33,4c3e35,4d4035,4d4035,4b3e35,483e35,463c35,443933,423632,413330,3e2f2f,3b2b2c,38272a,362428,342227,321e24,301c22,2f1c21|2f2026,2f2026,302126,38292c,3a2b2c,3d2e2e,3e2e2c,43332f,483932,4a3c33,4d4035,4f4236,514438,524639,524639,514537,4d4337,4b4136,493e35,463a32,443731,413230,3d2d2e,3c2a2c,38262a,362327,332025,311d23,301c22|312128,322329,35252a,39292c,3b2b2c,3f302d,43332f,473831,4b3d34,4e3f34,514437,534739,554a3a,574c3b,574c3b,554b3a,524839,504637,4c4235,4a3d34,473931,433430,41302e,3d2c2c,3b282b,382529,342127,321e24,301d23|2d1c23,312125,362629,382829,3c2c2c,42312e,483732,4a3b33,4d3f35,514336,54483a,584c3b,5a4f3c,5b523e,5b523e,59503c,574d3a,554939,514637,4d4133,4a3c32,473630,42312f,3f2d2d,3c292b,39272b,362228,321f25,301e23|332126,352528,3c2b2e,3c2a2c,402f2e,42312d,483831,4a3a31,504236,544639,584c3b,5c513e,5e5440,5f5740,5f5740,5d553f,5d523d,5a4e3b,554938,514336,4d3e32,493931,44332f,412f2f,3d2a2c,3a272b,362327,332025,311e24|311e24,322024,39272a,3a2829,412f2e,42302c,493932,4c3c32,524437,56493a,5a4e3c,5e533f,605741,635a43,625a42,605841,5f553e,5d513c,584c39,544535,4f3f33,4a3931,46342f,42302f,3d2b2c,3b282b,362327,332025,311f25|362329,362327,3c292c,3b292a,43312f,41312c,4a3933,4c3d33,524437,564a39,5b503d,5e5540,625943,645c44,635d44,625a42,605640,5e513d,594c3a,544636,4f3f33,4a3a31,45342f,42312e,3d2b2c,3b282a,362327,332025,321e25|342125,362327,39272a,3d2b2c,402f2e,433431,483934,4b3e34,53463a,534838,5c5140,5e5541,625943,625a42,645e45,635b44,605542,5d513f,584c3b,534638,4e3f34,493a32,44352f,42312e,3d2c2b,3a282a,362327,332024,321e24|332125,362326,38272a,3c2b2b,3e2e2e,433330,473933,4a3d35,504439,55493c,564c3c,5f5543,5d5440,675e48,615a42,5f5741,5f5442,5c5040,574a3c,524638,4d4035,483b32,44352f,41322f,3d2c2b,3a282a,362327,332024,331e24|322024,352226,382629,3b292a,3e2e2d,42322f,463833,493c34,4f4239,54483c,554b3c,5d5342,5a523f,605744,5d543f,5e5540,5c5140,594d3d,55483a,504337,4c3e35,483932,433430,40312e,3c2b2a,39282a,362327,332024,321e24|322024,342225,372629,3b292a,3d2d2c,41312f,463632,483934,4d3f37,4f4337,564a3d,574c3d,5b5141,544c3a,584f3c,5c5240,584c3c,55493b,514437,4d4035,4a3b34,463730,41322e,3e2f2c,3b292a,392729,362326,322024,321d23|321f23,342125,362527,39282a,3c2b2b,3f2f2e,433431,463833,463830,4d4138,4f4239,4e4437,564c3d,5b5142,574d3e,53493a,53473a,514438,4e4036,4a3c33,473831,43342f,41302d,3e2d2b,3a2829,372627,342225,321f23,301d23|311e23,332024,352326,382628,3a282a,3e2c2d,41312f,433431,483a35,493c34,221514,170b14,1c0f14,4c4136,51463a,53473b,4f4237,4d4035,4a3c33,483931,453630,42322e,3f2e2c,3c2b2a,382628,362427,332024,311d23,301c23|301d21,321f23,342125,362326,382628,3b292a,3e2e2d,41312f,423330,463833,1a0b14,160b14,180b14,50433b,4a3e35,493d34,4a3d34,493b33,473831,443630,43322e,402f2c,3c2b2a,392829,372427,342226,321f23,301c22,2f1c23|2f1c20,311e22,332024,352226,362527,39282a,3c2c2c,3e2e2e,413130,423230,1c0d14,1a0b14,1e1014,483b35,443730,483934,473831,463730,43342f,41322e,402f2c,3d2c2a,392829,372527,362327,332125,311e24,2f1c21,2e1b22|301d21,301d21,311e22,332024,352326,382628,3b292b,3c2b2b,3d2d2e,3e2e2e,413130,423331,433431,433431,433431,423430,42332f,43322e,41302e,3f2e2c,3c2b2a,392829,382527,372427,332024,321e24,301d24,2f1c23,2e1b22|2f1c21,2f1c20,301d21,321f23,332125,362527,38272a,39282a,3b2b2c,3c2c2c,3d2d2e,3f2f2f,403030,3f312f,3f312f,3f302e,402f2d,3f2e2c,3e2d2c,3c2b2a,392829,372627,362326,342226,321e24,311e24,301d24,2f1c23,2e1b22|2e1b22,2e1b21,2f1c21,301d23,321e24,332125,352327,362527,382629,392729,3b292b,3b2b2c,3c2c2d,3c2c2c,3c2c2c,3c2c2c,3c2b2b,3c2a2a,3b2829,392629,372528,352226,332125,321f25,301d23,301d24,301c24,2f1c24,2f1c23|2e1b22,2e1b22,2e1b22,2f1c21,301d23,311e24,322025,322024,352327,362427,372629,382729,382829,38282a,382829,392729,392629,382628,372527,362327,342226,332025,321e24,311e25,2f1c23,2f1c23,2f1c24,2f1c24,2f1c23|2f1c24,2f1c23,2f1c23,2f1c23,301c23,301d23,311d23,311e23,332024,332124,342225,352326,362426,362426,362426,362426,362326,372226,362125,342025,322024,311e24,301d24,301c24,2e1b23,2e1b23,2f1c24,2f1c24,301c24|301c24,2f1c24,2f1c23,2f1c23,2f1c23,301c23,301c22,301d23,311e23,321f23,322023,322124,332123,332123,332123,332123,352125,342024,331f24,321e23,301d23,301c22,2f1c24,2e1b23,2f1c24,2f1c24,2f1c24,2f1c24,2f1c24'.split('|').map(r=>r.split(',').map(c=>'#'+c));
 function drawFlipText(t,x,y){if(facingSouth){ctx.save();ctx.translate(x,y);ctx.scale(-1,-1);ctx.fillText(t,0,0);ctx.restore()}else ctx.fillText(t,x,y)}
 function drawHealthBar(bx,byAbove,byBelow,bw,pct){
@@ -1640,7 +1767,6 @@ function drawHealthBar(bx,byAbove,byBelow,bw,pct){
     ctx.fillStyle='#00ff00';ctx.fillRect(bx,byAbove,Math.max(0,bw*pct),3);
   }
 }
-
 
 // ===== PRAYER ICONS (base64) =====
 const PRAYER_IMG_DATA={
@@ -2123,6 +2249,16 @@ function histogramColor(dmgVal){
   else{let t=Math.min((dmgVal-60)/60,1);r=Math.floor(220-t*100);g=0;b=0}
   return`rgb(${r},${g},${b})`;
 }
+function getDamageHistogram(result){
+  if(Array.isArray(result.damageBuckets)){
+    return {buckets:result.damageBuckets.slice(0,20),maxDmg:Math.max(result.damageMax||100,1)};
+  }
+  let damages=Array.isArray(result.damages)?result.damages:[];
+  let buckets=new Array(20).fill(0);
+  let maxDmg=Math.max(...damages,100);
+  for(let d of damages){let b=Math.min(Math.floor(d/maxDmg*20),19);buckets[b]++}
+  return {buckets,maxDmg};
+}
 
 function toggleCompass(){facingSouth=!facingSouth;document.getElementById('compassBtn').textContent=facingSouth?'S':'N';render()}
 function toggleLegend(){
@@ -2448,7 +2584,8 @@ canvas.addEventListener('click',function(e){
   playerPlacement={x:gx,y:gy};
   if(autozukMode&&!autozukRunning){
     let key=`${gx},${gy}`;
-    if(autozukResults[key]){selectedTile={x:gx,y:gy};activePrayerSeq=autozukResults[key].prayer;showTileDetail(gx,gy);setStatus(`Player placed at (${gx}, ${gy}) — click STEP/PLAY to sim`,'info');render();return}
+    let result=autozukResults[key];
+    if(result){selectedTile={x:gx,y:gy};activePrayerSeq=result.prayer;showTileDetail(gx,gy);setStatus(`Player placed at (${gx}, ${gy}) — click STEP/PLAY to sim`,'info');render();return}
     else if(excludedTiles.has(key)){setStatus(`Player placed at (${gx}, ${gy}) — excluded tile`,'info');render();return}
   }
   setStatus(`Player placed at (${gx}, ${gy})`,'info');render();
@@ -2568,12 +2705,21 @@ function buildWorkerBlobUrl(){
   let blob = new Blob([simCore + ';\n' + workerSrc], {type:'application/javascript'});
   return URL.createObjectURL(blob);
 }
+function getAutozukWasmUrls(){
+  let base=document.baseURI||window.location.href;
+  return {
+    glueUrl:new URL('pkg/autozuk_wasm.js',base).href,
+    wasmUrl:new URL('pkg/autozuk_wasm_bg.wasm',base).href
+  };
+}
 class WorkerPool {
   constructor(size, pillarConfig, loadout){
-    this.size = Math.max(1, Math.min(size, 8));
+    this.size = Math.max(1, Math.min(size, 16));
     this.workers = [];
     this.idle = [];
     this.queue = [];
+    this.engine = 'js';
+    this.wasmUrls = getAutozukWasmUrls();
     this.blobUrl = buildWorkerBlobUrl();
     for(let i=0;i<this.size;i++){
       let w = new Worker(this.blobUrl);
@@ -2585,7 +2731,10 @@ class WorkerPool {
       };
       this.workers.push(w);
     }
-    this.initPromise = Promise.all(this.workers.map(w=>this._send(w, {type:'init', pillarConfig, loadout})));
+    this.initPromise = Promise.all(this.workers.map(w=>this._send(w, {type:'init', pillarConfig, loadout, wasm:this.wasmUrls}))).then(results=>{
+      this.engine = results.some(r=>r&&r.engine==='wasm') ? 'wasm' : 'js';
+      return results;
+    });
   }
   _send(worker, msg){
     return new Promise((resolve, reject)=>{
@@ -2606,10 +2755,10 @@ class WorkerPool {
       this.idle.push(worker);
     }
   }
-  async ready(){ await this.initPromise; }
-  dispatch(msg){
-    return new Promise((resolve, reject)=>{
-      if(this.idle.length > 0){
+	  async ready(){ await this.initPromise; }
+	  dispatch(msg){
+	    return new Promise((resolve, reject)=>{
+	      if(this.idle.length > 0){
         let w = this.idle.pop();
         this._send(w, msg).then(resolve, reject);
       } else {
@@ -2654,6 +2803,37 @@ async function startAutozuk(){
   document.getElementById('liveFeedPanel').innerHTML='';
   startSolverBuzz();
   let liveFeedEntries=0;
+  let progressEl=document.getElementById('progressFill');
+  let solverStatusEl=document.getElementById('autozukStatus');
+  let solverUiPending=false,solverUiProgress=null,solverUiStatus=null,solverUiNeedsRender=false;
+  function flushSolverUi(){
+    solverUiPending=false;
+    if(solverUiProgress!==null){progressEl.style.width=solverUiProgress+'%';solverUiProgress=null}
+    if(solverUiStatus!==null){solverStatusEl.textContent=solverUiStatus;solverUiStatus=null}
+    if(solverUiNeedsRender){solverUiNeedsRender=false;render()}
+  }
+  function scheduleSolverUi(){
+    if(solverUiPending)return;
+    solverUiPending=true;
+    requestAnimationFrame(flushSolverUi);
+  }
+  function setSolverProgress(pct,status){
+    if(pct!==undefined&&pct!==null)solverUiProgress=Math.max(0,Math.min(100,pct));
+    if(status!==undefined)solverUiStatus=status;
+    scheduleSolverUi();
+  }
+  function setSolverStatus(status){
+    solverUiStatus=status;
+    scheduleSolverUi();
+  }
+  function requestSolverRender(){
+    solverUiNeedsRender=true;
+    scheduleSolverUi();
+  }
+  async function letSolverUiPaint(){
+    flushSolverUi();
+    await new Promise(resolve=>requestAnimationFrame(resolve));
+  }
 
   let maxSims=parseInt(document.getElementById('maxSims').value)||400;
   let maxTicks=parseInt(document.getElementById('maxTicks').value)||400;
@@ -2663,6 +2843,8 @@ async function startAutozuk(){
   // Reduce tick cap for waves without a mager
   let hasMager=parsed.spawns.some(s=>s.type==='mager');
   if(!hasMager&&maxTicks>150)maxTicks=150;
+  let workerBudget=Math.max(1,(navigator.hardwareConcurrency||4)-1);
+  let poolSize = Math.max(1, Math.min(workerBudget, 16));
 
   // Build preview mobs for exclusion check
   updatePreview();
@@ -2671,13 +2853,15 @@ async function startAutozuk(){
   let testRegion=createRegion(pillars);
 
   // STEP 1: Exclusion sweep (parallel, in workers)
-  document.getElementById('autozukStatus').textContent='Phase 1: Excluding tiles...';
-  let allTiles=[];
-  for(let y=ARENA_Y_MIN;y<=ARENA_Y_MAX;y++)for(let x=ARENA_X_MIN;x<=ARENA_X_MAX;x++)allTiles.push({x,y});
+  setSolverProgress(0,`Loading ${poolSize} solver workers...`);
+  await letSolverUiPaint();
+  let allTiles=allArenaTiles();
 
-  let poolSize = Math.max(1, Math.min((navigator.hardwareConcurrency||4) - 1, 8));
   window._autozukPool = new WorkerPool(poolSize, pillars, loadout);
+  setSolverStatus('Loading Rust/WASM worker modules...');
   await window._autozukPool.ready();
+  let solverEngineLabel = window._autozukPool.engine==='wasm' ? 'Rust/WASM' : 'JavaScript';
+  setSolverStatus(`Excluding tiles with ${solverEngineLabel}...`);
 
   let eligibleTiles=[];
   let chunkSize = Math.max(20, Math.ceil(allTiles.length / (poolSize*2)));
@@ -2688,8 +2872,7 @@ async function startAutozuk(){
     return window._autozukPool.dispatch({type:'exclude', tiles:chunk, spawnCode:code}).then(res=>{
       excludeCompleted += chunk.length;
       let pct = Math.floor(excludeCompleted/allTiles.length*100);
-      document.getElementById('progressFill').style.width = (pct*0.2) + '%';
-      document.getElementById('autozukStatus').textContent = `Excluding: ${excludeCompleted}/${allTiles.length} tiles checked`;
+      setSolverProgress(pct*0.2,`Excluding (${solverEngineLabel}): ${excludeCompleted}/${allTiles.length} tiles checked`);
       return res;
     });
   }));
@@ -2697,47 +2880,203 @@ async function startAutozuk(){
     for(let t of res.excluded){ excludedTiles.add(`${t.x},${t.y}`); playExclusionBlip(); }
     for(let t of res.eligible) eligibleTiles.push(t);
   }
-  render();
+  requestSolverRender();
 
   setStatus(`${eligibleTiles.length} tiles to simulate, ${excludedTiles.size} excluded`,'info');
 
-  // STEP 2: Simulate each eligible tile (parallel, in workers)
-  let totalTiles=eligibleTiles.length,completedTiles=0;
-  document.getElementById('autozukStatus').textContent=`Simulating ${totalTiles} tiles across ${poolSize} workers...`;
-  let seedBase=(Date.now()&0xffffffff)>>>0;
-  startSolverVisualPreview(code,loadout,maxTicks,maxSims,seedBase);
+	  // STEP 2: Simulate each eligible tile (parallel, in workers)
+	  let totalTiles=eligibleTiles.length,completedTiles=0;
+	  setSolverStatus(`Simulating ${totalTiles} tiles across ${poolSize} ${solverEngineLabel} workers...`);
+	  let seedBase=(Date.now()&0xffffffff)>>>0;
 
-  await Promise.all(eligibleTiles.map(tile=>{
-    return window._autozukPool.dispatch({
-      type:'simulate', tile, spawnCode:code, loadout, maxTicks, maxSims, seedBase
-    }).then(res=>{
-      completedTiles++;
+  let pendingDisplayResults=[];
+  let displayFlushScheduled=false;
+  let pendingScoreTotal=0,pendingScoreCount=0;
+  const prayLabels={mage:'M',range:'R',melee:'X'};
+  function makeFeedRow(tile,summary){
+    let dmgRound=Math.round(summary.avgDamage);
+    let dmgColor=heatmapColor(summary.avgDamage,1);
+    let prayHtml=[1,2,3,0].map(i=>summary.prayer[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
+    let barW=Math.min(100,summary.avgDamage);
+    let row=document.createElement('div');row.className='feed-row';
+    row.style.borderLeftColor=dmgColor;
+    let deathLabel=summary.markedDead?` \u2620${Math.round(summary.deathPct)}%`:'';
+    row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${summary.totalSims}</span>`;
+    return row;
+  }
+  function queueTileDisplay(tile,summary){
+    if(summary){
+      let key=`${tile.x},${tile.y}`;
+      autozukResults[key]=summary;
+      pendingDisplayResults.push({tile,summary});
+      pendingScoreTotal+=summary.avgDamage;pendingScoreCount++;
+    }
+  }
+  function flushDisplayResults(){
+    displayFlushScheduled=false;
+    if(pendingDisplayResults.length===0){requestSolverRender();return}
+    let items=pendingDisplayResults.splice(0);
+    let feedItems=items.length>80?items.slice(-80):items;
+    let fragment=document.createDocumentFragment();
+    for(let item of feedItems)fragment.appendChild(makeFeedRow(item.tile,item.summary));
+    let feedPanel=document.getElementById('liveFeedPanel');
+    feedPanel.appendChild(fragment);
+    while(feedPanel.childNodes.length>80)feedPanel.removeChild(feedPanel.firstChild);
+    feedPanel.scrollTop=feedPanel.scrollHeight;
+    liveFeedEntries+=items.length;
+    let latest=items[items.length-1];
+    if(pendingScoreCount>0){playScoreBlip(pendingScoreTotal/pendingScoreCount);pendingScoreTotal=0;pendingScoreCount=0}
+    registerSolverVisualPreview(latest.tile,completedTiles);
+    updateLiveDetail(latest.tile.x,latest.tile.y,latest.summary);
+    requestSolverRender();
+  }
+  function scheduleDisplayFlush(){
+    if(displayFlushScheduled)return;
+    displayFlushScheduled=true;
+    requestAnimationFrame(flushDisplayResults);
+  }
+  function markTileProgress(count){
+      if(count<=0)return;
+      completedTiles=Math.min(totalTiles,completedTiles+count);
       let pct=20+Math.floor(completedTiles/totalTiles*80);
-      document.getElementById('progressFill').style.width=pct+'%';
-      document.getElementById('autozukStatus').textContent=`Simulated ${completedTiles}/${totalTiles} tiles`;
-      if(res.summary){
-        let key=`${tile.x},${tile.y}`;
-        autozukResults[key]=res.summary;
-        playScoreBlip(res.summary.avgDamage);
-        registerSolverVisualPreview(tile,completedTiles);
-        updateLiveDetail(tile.x,tile.y,res.summary);
-        liveFeedEntries++;
-        let prayLabels={mage:'M',range:'R',melee:'X'};
-        let dmgRound=Math.round(res.summary.avgDamage);
-        let dmgColor=heatmapColor(res.summary.avgDamage,1);
-        let prayHtml=[1,2,3,0].map(i=>res.summary.prayer[i]).map(p=>`<div class="fp ${p}">${prayLabels[p]}</div>`).join('');
-        let barW=Math.min(100,res.summary.avgDamage);
-        let row=document.createElement('div');row.className='feed-row';
-        row.style.borderLeftColor=dmgColor;
-        let deathLabel=res.summary.markedDead?` \u2620${Math.round(res.summary.deathPct)}%`:'';
-        row.innerHTML=`<span class="feed-tile">(${tile.x},${tile.y})</span><span class="feed-dmg" style="color:${dmgColor}">${dmgRound}${deathLabel}</span><div class="feed-bar"><div class="feed-bar-inner" style="width:${barW}%;background:${dmgColor}"></div></div><div class="feed-prayer">${prayHtml}</div><span class="feed-sims">${res.summary.totalSims}</span>`;
-        let feedPanel=document.getElementById('liveFeedPanel');
-        feedPanel.appendChild(row);
-        feedPanel.scrollTop=feedPanel.scrollHeight;
+      setSolverProgress(pct,`Simulated ${completedTiles}/${totalTiles} tiles`);
+  }
+  function markTileBatchComplete(items,countProgress=true){
+      if(countProgress)markTileProgress(items.length);
+      for(let item of items){
+        if(item.summary)queueTileDisplay(item.tile,item.summary);
       }
-      render();
-    });
-  }));
+      scheduleDisplayFlush();
+  }
+  function compareTileScores(a,b){
+    return a.summary.avgDamage-b.summary.avgDamage||a.summary.avgTicks-b.summary.avgTicks||a.tile.x-b.tile.x||a.tile.y-b.tile.y;
+  }
+  function rankTileItems(items){
+    return items.filter(item=>item.summary).sort(compareTileScores);
+  }
+  function topRankedTileItems(items,limit){
+    if(limit<=0)return[];
+    let top=[];
+    for(let item of items){
+      if(!item.summary)continue;
+      let insertAt=top.length;
+      while(insertAt>0&&compareTileScores(item,top[insertAt-1])<0)insertAt--;
+      if(insertAt>=limit)continue;
+      top.splice(insertAt,0,item);
+      if(top.length>limit)top.pop();
+    }
+    return top;
+  }
+  let baseSimBatchSize = window._autozukPool.engine==='wasm' ? (maxSims>1000?8:(maxSims>400?16:(maxSims>200?32:64))) : 1;
+  async function runSimBatches(tilesToRun, stageMaxSims, stageLabel, batchSize=baseSimBatchSize, quickPrune=false, topLimit=0){
+    let simJobs=[];
+    for(let i=0;i<tilesToRun.length;i+=batchSize)simJobs.push(tilesToRun.slice(i,i+batchSize));
+    let stageResults=[],stageCompleted=0;
+    await Promise.all(simJobs.map(tiles=>{
+      let msg = tiles.length===1
+        ? {type:'simulate', tile:tiles[0], spawnCode:code, maxTicks, maxSims:stageMaxSims, seedBase, quickPrune, topLimit}
+        : {type:'simulate-batch', tiles, spawnCode:code, maxTicks, maxSims:stageMaxSims, seedBase, quickPrune, topLimit};
+      return window._autozukPool.dispatch(msg).then(res=>{
+        let items;
+        if(res.type==='simulate-batch-result')items=res.results;
+        else items=[{tile:tiles[0],summary:res.summary}];
+        stageResults.push(...items);
+        stageCompleted+=tiles.length;
+        setSolverStatus(`${stageLabel}: ${stageCompleted}/${tilesToRun.length} candidates`);
+      });
+    }));
+    return stageResults;
+  }
+  function compactStages(base,max){
+    let seen=new Set(),out=[];
+    for(let s of base){s=Math.min(s,max);if(s>0&&!seen.has(s)){seen.add(s);out.push(s)}}
+    return out;
+  }
+  function adaptiveStages(max){
+    return compactStages([20,40,max],max);
+  }
+  function adaptiveBeamSize(totalTiles){
+    return Math.min(totalTiles,Math.max(16,Math.min(48,Math.ceil(Math.sqrt(totalTiles)/2))));
+  }
+  function isLowVarianceBarrageWave(){
+    return parsed.spawns.every(s=>s.type==='nothing'||s.type==='meleer'||s.type==='blob');
+  }
+  function adaptiveSearchProfile(max,totalTiles){
+    if(window._autozukPool.engine==='wasm'&&loadout.isBloodBarrage&&max>=400&&isLowVarianceBarrageWave()){
+      return {
+        name:'Fast adaptive',
+        stages:compactStages([5,20,max],max),
+        firstBeam:Math.min(totalTiles,32),
+        minBeam:6,
+        shrink:0.1875,
+        batchSize:8,
+        candidateBatchSize:1,
+        quickPrune:false,
+        lowLatency:true
+      };
+    }
+    return {
+      name:'Adaptive',
+      stages:adaptiveStages(max),
+      firstBeam:adaptiveBeamSize(totalTiles),
+      minBeam:8,
+      shrink:0.5,
+      batchSize:baseSimBatchSize,
+      candidateBatchSize:1,
+      quickPrune:false,
+      lowLatency:false
+    };
+  }
+	  async function runStandardSolver(){
+	    let simJobs=[];
+	    for(let i=0;i<eligibleTiles.length;i+=baseSimBatchSize)simJobs.push(eligibleTiles.slice(i,i+baseSimBatchSize));
+	    await Promise.all(simJobs.map(tiles=>{
+	      let msg = tiles.length===1
+	        ? {type:'simulate', tile:tiles[0], spawnCode:code, maxTicks, maxSims, seedBase}
+	        : {type:'simulate-batch', tiles, spawnCode:code, maxTicks, maxSims, seedBase};
+      return window._autozukPool.dispatch(msg).then(res=>{
+      if(res.type==='simulate-batch-result'){
+        markTileBatchComplete(res.results);
+      }else{
+        markTileBatchComplete([{tile:tiles[0],summary:res.summary}]);
+      }
+      });
+    }));
+  }
+  async function runAdaptiveSolver(){
+    let activeTiles=eligibleTiles.slice();
+    let profile=adaptiveSearchProfile(maxSims,activeTiles.length);
+    let stages=profile.stages.slice(0,-1);
+    setSolverStatus(`${profile.name}: screening likely winners`);
+    for(let stageIndex=0;stageIndex<stages.length;stageIndex++){
+      if(activeTiles.length===0)break;
+      let stage=stages[stageIndex];
+      let label=`${profile.name} ${stage}/${maxSims} sims`;
+      let stageBatchSize=stageIndex===0?profile.batchSize:(profile.candidateBatchSize||profile.batchSize);
+      let requestedKeep=stageIndex===0?Math.min(profile.firstBeam,activeTiles.length):Math.min(activeTiles.length,Math.max(profile.minBeam,Math.ceil(activeTiles.length*profile.shrink)));
+      let stageItems=await runSimBatches(activeTiles,stage,label,stageBatchSize,profile.quickPrune,requestedKeep);
+      let scoredCount=stageItems.reduce((n,item)=>n+(item.summary?1:0),0);
+      let nextCount=Math.min(scoredCount,requestedKeep);
+      let ranked=topRankedTileItems(stageItems,nextCount);
+      let nextTiles=ranked.slice(0,nextCount).map(item=>item.tile);
+      if(nextTiles.length)setSolverStatus(`${profile.name} ${stage}/${maxSims}: running ${nextTiles.length} likely winners first`);
+      activeTiles=nextTiles;
+    }
+    let firstKeys=new Set(activeTiles.map(tileKey));
+    let remainingTiles=eligibleTiles.filter(tile=>!firstKeys.has(tileKey(tile)));
+    if(activeTiles.length)await runSimBatches(activeTiles,maxSims,'Full sims: likely winners',profile.candidateBatchSize||profile.batchSize,false,0).then(items=>markTileBatchComplete(items));
+    if(remainingTiles.length)await runSimBatches(remainingTiles,maxSims,'Full sims: remaining tiles',baseSimBatchSize,false,0).then(items=>markTileBatchComplete(items));
+  }
+  let hasWaveMobs=parsed.spawns.some(s=>s.type!=='nothing');
+  let useAdaptiveSolver=window._autozukPool.engine==='wasm'&&hasWaveMobs&&maxSims>=100;
+  let previewProfile=useAdaptiveSolver?adaptiveSearchProfile(maxSims,eligibleTiles.length):null;
+  if(!previewProfile||!previewProfile.lowLatency)startSolverVisualPreview(code,loadout,maxTicks,maxSims,seedBase);
+  if(useAdaptiveSolver){
+    await runAdaptiveSolver();
+  }else{
+    await runStandardSolver();
+  }
+  if(displayFlushScheduled)flushDisplayResults();
 
   // Tear down the pool now that the batch is complete
   if(window._autozukPool){ window._autozukPool.terminate(); window._autozukPool=null; }
@@ -2757,14 +3096,19 @@ async function startAutozuk(){
 
   // Find best tile
   let bestKey=null,bestDmg=Infinity;
-  for(let key in autozukResults){if(autozukResults[key].avgDamage<bestDmg){bestDmg=autozukResults[key].avgDamage;bestKey=key}}
+  for(let key in autozukResults){
+    let result=autozukResults[key];
+    if(result.avgDamage<bestDmg){bestDmg=result.avgDamage;bestKey=key}
+  }
   if(bestKey){
     let[bx,by]=bestKey.split(',').map(Number);
     selectedTile={x:bx,y:by};playerPlacement={x:bx,y:by};activePrayerSeq=autozukResults[bestKey].prayer;
     showTileDetail(bx,by);
     let scoreName=currentLoadout.isBloodBarrage?'max HP deficit':'dmg';
-    document.getElementById('autozukStatus').textContent=`Done! Best tile: (${bx},${by}) — avg ${Math.round(bestDmg)} ${scoreName}`;
-    setStatus(`Best tile: (${bx},${by}) with ~${Math.round(bestDmg)} avg ${scoreName}`,'info');
+    let bestSims=autozukResults[bestKey].totalSims||maxSims;
+    let simNote=bestSims<maxSims?` (${bestSims}/${maxSims} sims)`:``;
+    document.getElementById('autozukStatus').textContent=`Done! Best tile: (${bx},${by}) — avg ${Math.round(bestDmg)} ${scoreName}${simNote}`;
+    setStatus(`Best tile: (${bx},${by}) with ~${Math.round(bestDmg)} avg ${scoreName}${simNote}`,'info');
   }else{
     document.getElementById('autozukStatus').textContent='Done! No valid tiles found.';
     setStatus('No valid tiles found','error');
@@ -2820,9 +3164,7 @@ function showTileDetail(x,y){
   requestAnimationFrame(()=>{
     let hc=document.getElementById('histCanvas');if(!hc)return;
     let hctx=hc.getContext('2d');hc.width=hc.parentElement.clientWidth;hc.height=70;
-    let buckets=new Array(20).fill(0);
-    let maxDmg=Math.max(...result.damages,100);
-    for(let d of result.damages){let b=Math.min(Math.floor(d/maxDmg*20),19);buckets[b]++}
+    let {buckets,maxDmg}=getDamageHistogram(result);
     let maxB=Math.max(...buckets,1);
     let bw=hc.width/20;
     for(let i=0;i<20;i++){
@@ -2862,9 +3204,7 @@ function updateLiveDetail(x,y,result){
   requestAnimationFrame(()=>{
     let hc=document.getElementById('liveHistCanvas');if(!hc)return;
     let hctx=hc.getContext('2d');hc.width=hc.parentElement.clientWidth;hc.height=70;
-    let buckets=new Array(20).fill(0);
-    let maxDmg=Math.max(...result.damages,100);
-    for(let d of result.damages){let b=Math.min(Math.floor(d/maxDmg*20),19);buckets[b]++}
+    let {buckets,maxDmg}=getDamageHistogram(result);
     let maxB=Math.max(...buckets,1);let bw=hc.width/20;
     for(let i=0;i<20;i++){let h=buckets[i]/maxB*60;let dmgVal=(i+0.5)/20*maxDmg;
       hctx.fillStyle=histogramColor(dmgVal);hctx.fillRect(i*bw+1,70-h,bw-2,h)}
